@@ -24,6 +24,12 @@ from server.game_engine import (
 )
 
 
+def _normalize_username(username: str) -> str:
+    """Normalize username for case-insensitive identity checks."""
+
+    return username.casefold()
+
+
 @dataclass(slots=True)
 class ServerState:
     """
@@ -46,6 +52,7 @@ class ServerState:
 
     # Client/session registry.
     _client_usernames: dict[str, str | None] = field(default_factory=dict)
+    # Maps normalized username -> client_id (case-insensitive uniqueness).
     _username_to_client: dict[str, str] = field(default_factory=dict)
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
 
@@ -80,9 +87,9 @@ class ServerState:
             self._client_sockets.pop(client_id, None)
 
             if previous_username is not None:
-                owner_id = self._username_to_client.get(previous_username)
+                owner_id = self._username_to_client.get(_normalize_username(previous_username))
                 if owner_id == client_id:
-                    self._username_to_client.pop(previous_username, None)
+                    self._username_to_client.pop(_normalize_username(previous_username), None)
                 self._cleanup_user_lobby_state(previous_username)
 
             return sorted(self._username_to_client.keys())
@@ -94,17 +101,18 @@ class ServerState:
             if client_id not in self._client_usernames:
                 return False, "unknown_client"
 
-            existing_owner = self._username_to_client.get(username)
+            normalized_username = _normalize_username(username)
+            existing_owner = self._username_to_client.get(normalized_username)
             if existing_owner is not None and existing_owner != client_id:
                 return False, "username_taken"
 
             previous_username = self._client_usernames[client_id]
             if previous_username is not None and previous_username != username:
-                self._username_to_client.pop(previous_username, None)
+                self._username_to_client.pop(_normalize_username(previous_username), None)
                 self._cleanup_user_lobby_state(previous_username)
 
             self._client_usernames[client_id] = username
-            self._username_to_client[username] = client_id
+            self._username_to_client[normalized_username] = client_id
             return True, "accepted"
 
     def get_client_username(self, client_id: str) -> str | None:
@@ -117,7 +125,10 @@ class ServerState:
         """Return all online usernames sorted for deterministic payloads."""
 
         with self._lock:
-            return sorted(self._username_to_client.keys())
+            return sorted(
+                [username for username in self._client_usernames.values() if username is not None],
+                key=str.casefold,
+            )
 
     def get_client_sockets(self) -> list[socket.socket]:
         """Return currently connected sockets for broadcast operations."""
@@ -129,7 +140,7 @@ class ServerState:
         """Find active socket for a given online username, if any."""
 
         with self._lock:
-            client_id = self._username_to_client.get(username)
+            client_id = self._username_to_client.get(_normalize_username(username))
             if client_id is None:
                 return None
             return self._client_sockets.get(client_id)
@@ -144,10 +155,12 @@ class ServerState:
         """Create pending invitation if both users are eligible."""
 
         with self._lock:
+            from_user = self._resolve_username(from_user)
+            to_user = self._resolve_username(to_user)
+            if from_user is None or to_user is None:
+                return False, "user_offline"
             if from_user == to_user:
                 return False, "cannot_invite_self"
-            if from_user not in self._username_to_client or to_user not in self._username_to_client:
-                return False, "user_offline"
             if from_user in self._user_to_match or to_user in self._user_to_match:
                 return False, "user_in_match"
             if from_user in self._busy_invite_users or to_user in self._busy_invite_users:
@@ -167,6 +180,10 @@ class ServerState:
         """
 
         with self._lock:
+            from_user = self._resolve_username(from_user)
+            to_user = self._resolve_username(to_user)
+            if from_user is None or to_user is None:
+                return False, "invite_not_found", None
             invite_key = (from_user, to_user)
             if invite_key not in self._pending_invites:
                 return False, "invite_not_found", None
@@ -294,3 +311,13 @@ class ServerState:
                 for player in players:
                     if player != username:
                         self._user_to_match.pop(player, None)
+
+    def _resolve_username(self, username: str) -> str | None:
+        """
+        Resolve any username casing to the canonical currently-registered value.
+        """
+
+        client_id = self._username_to_client.get(_normalize_username(username))
+        if client_id is None:
+            return None
+        return self._client_usernames.get(client_id)

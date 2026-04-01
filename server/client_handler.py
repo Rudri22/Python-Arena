@@ -95,7 +95,7 @@ def _handle_invitation_message(
 
     if action == "send":
         # For "send", connected sender must match `from_user`.
-        if from_user != sender_username:
+        if from_user.casefold() != sender_username.casefold():
             send_message(client_socket, make_error_message("Invitation sender mismatch."))
             return
 
@@ -127,7 +127,7 @@ def _handle_invitation_message(
 
     if action in {"accept", "decline", "cancel"}:
         # For response actions, connected sender should be the invited user (`to_user`).
-        if to_user != sender_username:
+        if to_user.casefold() != sender_username.casefold():
             send_message(client_socket, make_error_message("Invitation responder mismatch."))
             return
 
