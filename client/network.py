@@ -39,6 +39,9 @@ class ClientConnection:
         # Restore blocking mode after connect so receive loop behaves normally.
         self.socket.settimeout(None)
         self._buffer = ""
+        # Keep extra decoded messages if one recv contains multiple lines.
+        # This prevents message loss during bursts (online list + invitation).
+        self._pending_messages: list[dict[str, Any]] = []
 
     def send_message(self, message: dict[str, Any]) -> None:
         """Send one shared-protocol message to the server."""
@@ -54,9 +57,15 @@ class ClientConnection:
         """
 
         while True:
+            # Return already-decoded queued messages first.
+            if self._pending_messages:
+                return self._pending_messages.pop(0)
+
             messages, remainder = split_socket_buffer(self._buffer)
             if messages:
                 self._buffer = remainder
+                # Keep any additional messages for next receive calls.
+                self._pending_messages.extend(messages[1:])
                 return messages[0]
 
             data = self.socket.recv(4096)
