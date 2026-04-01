@@ -69,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Display username sent to server (if omitted, prompt screen is shown)",
     )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch Tkinter GUI client instead of terminal mode.",
+    )
 
     return parser.parse_args()
 
@@ -183,6 +188,13 @@ def main() -> None:
     """CLI entry point function for the client app."""
 
     args = parse_args()
+
+    if args.gui:
+        # Import lazily so terminal mode does not require GUI modules at import-time.
+        from client.gui import main as gui_main
+
+        gui_main()
+        return
 
     if args.username:
         # PBI 2.9: display validation result even when username comes from CLI.
