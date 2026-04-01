@@ -341,6 +341,27 @@ def make_online_users_message(users: list[str]) -> dict[str, Any]:
     return build_message(MessageType.ONLINE_USERS, users=users)
 
 
+def make_waiting_message(
+    username: str,
+    reason: str = "no_opponent_available",
+) -> dict[str, Any]:
+    """
+    Notify one user that they are currently in lobby waiting state.
+
+    We keep this under `INVITATION` with action=`waiting` to remain
+    backward-compatible with the existing protocol message types while still
+    giving frontend code a clear, explicit lobby state signal.
+    """
+
+    return build_message(
+        MessageType.INVITATION,
+        from_user="SERVER",
+        to_user=username,
+        action="waiting",
+        reason=reason,
+    )
+
+
 def make_invitation_message(
     from_user: str,
     to_user: str,
@@ -366,6 +387,63 @@ def make_invitation_message(
         payload["game_id"] = game_id
 
     return build_message(MessageType.INVITATION, **payload)
+
+
+def make_invitation_status_message(
+    from_user: str,
+    to_user: str,
+    action: str,
+    status: str,
+    message: str | None = None,
+    game_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Build standardized invitation lifecycle responses for Sprint 2 lobby flow.
+
+    Typical combinations:
+    - action="send", status="accepted_for_delivery"
+    - action="send", status="rejected_busy"
+    - action="accept", status="accepted"
+    - action="decline", status="accepted"
+    - action="cancel", status="accepted"
+    """
+
+    payload: dict[str, Any] = {
+        "from_user": from_user,
+        "to_user": to_user,
+        "action": action,
+        "status": status,
+    }
+    if message is not None:
+        payload["message"] = message
+    if game_id is not None:
+        payload["game_id"] = game_id
+
+    return build_message(MessageType.INVITATION, **payload)
+
+
+def make_match_start_message(
+    game_id: str,
+    players: list[str],
+) -> dict[str, Any]:
+    """
+    Build a match-start notification once an invitation is accepted.
+
+    We encode this as an invitation action to keep compatibility with the
+    current protocol enum while still carrying explicit game startup data.
+    """
+
+    if len(players) != 2:
+        raise ProtocolError("Match start must include exactly two players.")
+
+    return build_message(
+        MessageType.INVITATION,
+        from_user="SERVER",
+        to_user="both_players",
+        action="match_started",
+        game_id=game_id,
+        players=players,
+    )
 
 
 def make_movement_message(
