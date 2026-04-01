@@ -18,6 +18,8 @@ from shared.protocol import (
     make_chat_message,
     make_connect_message,
     make_error_message,
+    make_game_over_message,
+    make_game_state_message,
     make_invitation_message,
     make_online_users_message,
 )
@@ -186,9 +188,101 @@ def _handle_invitation_message(
                     send_message(sock, start_message)
                 except OSError:
                     continue
+
+            # Sprint 3 bootstrap: send initial authoritative game state
+            # immediately after match pairing is complete.
+            initial_state = server_state.get_match_state_dict(game_id)
+            if initial_state is not None:
+                game_state_message = make_game_state_message(game_id=game_id, state=initial_state)
+                for sock in [sender_socket, receiver_socket]:
+                    if sock is None:
+                        continue
+                    try:
+                        send_message(sock, game_state_message)
+                    except OSError:
+                        continue
         return
 
     send_message(client_socket, make_error_message("Unsupported invitation action."))
+
+
+def _handle_movement_message(
+    client_socket: socket.socket,
+    payload: dict,
+    server_state: ServerState,
+    sender_client_id: str,
+) -> None:
+    """
+    Sprint 3 backend movement integration.
+
+    - Validates command ownership and direction value.
+    - Applies movement through authoritative server state.
+    - Broadcasts GAME_STATE and optional GAME_OVER.
+    """
+
+    player = payload.get("player", "").strip()
+    direction = payload.get("direction", "").strip().lower()
+    sender_username = server_state.get_client_username(sender_client_id)
+
+    if sender_username is None:
+        send_message(client_socket, make_error_message("Username must be set before movement."))
+        return
+
+    if player != sender_username:
+        send_message(client_socket, make_error_message("Movement player mismatch."))
+        return
+
+    success, reason, game_id, state_dict, game_over_payload = server_state.process_player_movement(
+        player=player,
+        direction=direction,
+    )
+    if not success:
+        reason_to_message = {
+            "invalid_direction": "Invalid movement direction.",
+            "player_not_in_match": "You are not in an active match.",
+            "match_not_found": "Match state could not be found.",
+            "player_not_alive": "Your snake is no longer active.",
+            "match_finished": "Match has already ended.",
+        }
+        send_message(client_socket, make_error_message(reason_to_message.get(reason, "Movement rejected.")))
+        return
+
+    if game_id is None or state_dict is None:
+        send_message(client_socket, make_error_message("Internal state update failed."))
+        return
+
+    players = server_state.get_match_players(game_id)
+    if players is None:
+        send_message(client_socket, make_error_message("Unable to resolve match players."))
+        return
+
+    sockets = [server_state.get_socket_for_username(players[0]), server_state.get_socket_for_username(players[1])]
+
+    # PBI 3.12: broadcast packaged authoritative game state each update.
+    game_state_message = make_game_state_message(game_id=game_id, state=state_dict)
+    for sock in sockets:
+        if sock is None:
+            continue
+        try:
+            send_message(sock, game_state_message)
+        except OSError:
+            continue
+
+    # PBI 3.10/3.11: send explicit end-of-game summary when match is finished.
+    if game_over_payload is not None:
+        game_over_message = make_game_over_message(
+            game_id=game_over_payload["game_id"],
+            winner=game_over_payload["winner"],
+            final_scores=game_over_payload.get("final_scores"),
+            reason=game_over_payload.get("reason"),
+        )
+        for sock in sockets:
+            if sock is None:
+                continue
+            try:
+                send_message(sock, game_over_message)
+            except OSError:
+                continue
 
 
 def handle_incoming_message(
@@ -234,6 +328,15 @@ def handle_incoming_message(
 
     if message_type == MessageType.INVITATION.value:
         _handle_invitation_message(
+            client_socket=client_socket,
+            payload=payload,
+            server_state=server_state,
+            sender_client_id=client_id,
+        )
+        return
+
+    if message_type == MessageType.MOVEMENT.value:
+        _handle_movement_message(
             client_socket=client_socket,
             payload=payload,
             server_state=server_state,
