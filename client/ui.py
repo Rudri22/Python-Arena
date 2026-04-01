@@ -90,6 +90,28 @@ def show_invitation_notice(from_user: str) -> None:
     print("*" * 50)
 
 
+def show_invitation_update(from_user: str, to_user: str, action: str, game_id: str | None = None) -> None:
+    """
+    Display invitation lifecycle updates clearly for both players.
+
+    This is used so sender and receiver both get readable feedback when
+    invitations are accepted/declined/cancelled or when a match starts.
+    """
+
+    print("\n" + "*" * 50)
+    if action == "accepted":
+        print(f"Invitation accepted: {from_user} vs {to_user}")
+    elif action == "declined":
+        print(f"Invitation declined: {to_user} declined {from_user}'s invite")
+    elif action == "cancelled":
+        print(f"Invitation cancelled: {from_user} -> {to_user}")
+    elif action == "match_started":
+        print(f"Match started for {from_user} vs {to_user} (game_id={game_id})")
+    else:
+        print(f"Invitation update: {from_user} -> {to_user} ({action})")
+    print("*" * 50)
+
+
 def show_waiting_for_opponent_screen(current_username: str) -> None:
     """
     PBI 2.12: Display a waiting screen when no opponent is available.

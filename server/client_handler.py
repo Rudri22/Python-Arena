@@ -143,7 +143,7 @@ def _handle_invitation_message(
             send_message(client_socket, make_error_message(reason_to_error.get(reason, "Invitation action failed.")))
             return
 
-        # Notify both involved players about decision.
+        # Notify involved players about decision.
         sender_socket = server_state.get_socket_for_username(from_user)
         receiver_socket = server_state.get_socket_for_username(to_user)
         decision_message = make_invitation_message(
@@ -153,13 +153,23 @@ def _handle_invitation_message(
             game_id=game_id,
         )
 
-        for sock in [sender_socket, receiver_socket]:
-            if sock is None:
-                continue
-            try:
-                send_message(sock, decision_message)
-            except OSError:
-                continue
+        if reason == "accepted":
+            # UX rule: only inviter gets explicit "accepted" status message.
+            # The acceptor already knows they accepted via their own action.
+            if sender_socket is not None:
+                try:
+                    send_message(sender_socket, decision_message)
+                except OSError:
+                    pass
+        else:
+            # For decline/cancel, notify both sides for clear state sync.
+            for sock in [sender_socket, receiver_socket]:
+                if sock is None:
+                    continue
+                try:
+                    send_message(sock, decision_message)
+                except OSError:
+                    continue
 
         # PBI 2.7: match starts when invite is accepted.
         if reason == "accepted" and game_id is not None:
@@ -191,6 +201,16 @@ def handle_incoming_message(
 
     message_type = message["type"]
     payload = message["payload"]
+    current_username = server_state.get_client_username(client_id)
+
+    # Guardrail: user must successfully register a username before any
+    # other lobby actions (chat, invites, etc.) are allowed.
+    if message_type != MessageType.USERNAME.value and current_username is None:
+        send_message(
+            client_socket,
+            make_error_message("Choose an available username before continuing."),
+        )
+        return
 
     if message_type == MessageType.USERNAME.value:
         # PBI 2.1 + 2.2: receive username and enforce uniqueness.

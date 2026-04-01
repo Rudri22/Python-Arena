@@ -20,6 +20,7 @@ from client.ui import (
     prompt_username,
     prompt_opponent_selection,
     show_invitation_notice,
+    show_invitation_update,
     show_online_players,
     show_incoming,
     show_system,
@@ -113,18 +114,29 @@ def run_client(server_ip: str, server_port: int, username: str) -> None:
         server_connect = connection.receive_message()
         show_incoming(server_connect)
 
-        # Send username so backend can map this socket to a player identity.
-        connection.send_message(make_username_message(username))
+        # Username handshake loop:
+        # If username is duplicate/taken, server returns error and we force
+        # user to choose another name before entering lobby/chat.
+        while True:
+            connection.send_message(make_username_message(username))
+            username_response = connection.receive_message()
 
-        # PBI 2.10: next server message should include online users list.
-        username_response = connection.receive_message()
-        if username_response["type"] == MessageType.ONLINE_USERS.value:
-            online_users = username_response["payload"]["users"]
-            show_online_players(online_users)
-            if all(user == username for user in online_users):
-                # PBI 2.12: show waiting state when you're currently alone.
-                show_waiting_for_opponent_screen(current_username=username)
-        else:
+            if username_response["type"] == MessageType.ERROR.value:
+                show_incoming(username_response)
+                show_system("Please choose another username.")
+                username = prompt_username(default_username=DEFAULT_USERNAME)
+                continue
+
+            if username_response["type"] == MessageType.ONLINE_USERS.value:
+                online_users = username_response["payload"]["users"]
+                show_online_players(online_users)
+                if all(user == username for user in online_users):
+                    # PBI 2.12: show waiting state when you're currently alone.
+                    show_waiting_for_opponent_screen(current_username=username)
+                break
+
+            # Keep compatibility with alternative backend variants that send an
+            # explicit username-accepted message before online users.
             show_incoming(username_response)
 
         show_system("Type a chat message and press Enter.")
@@ -175,7 +187,20 @@ def run_client(server_ip: str, server_port: int, username: str) -> None:
                 online_users = response["payload"]["users"]
                 show_online_players(online_users)
             elif response["type"] == MessageType.INVITATION.value:
-                show_invitation_notice(response["payload"]["from_user"])
+                invitation_payload = response["payload"]
+                invitation_action = invitation_payload.get("action", "")
+
+                # Show specific invitation lifecycle updates so sender can
+                # clearly see whether invite was accepted or declined.
+                if invitation_action == "send":
+                    show_invitation_notice(invitation_payload["from_user"])
+                else:
+                    show_invitation_update(
+                        from_user=invitation_payload.get("from_user", "unknown"),
+                        to_user=invitation_payload.get("to_user", "unknown"),
+                        action=invitation_action,
+                        game_id=invitation_payload.get("game_id"),
+                    )
             else:
                 show_incoming(response)
 

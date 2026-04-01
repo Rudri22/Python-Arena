@@ -16,7 +16,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
 from client.network import ClientConnection
@@ -44,6 +44,7 @@ class ArenaGuiApp:
         self.running = False
         self.username = ""
         self.online_users: list[str] = []
+        self.username_confirmed = False
         self.incoming_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
 
         self._build_layout()
@@ -148,8 +149,9 @@ class ArenaGuiApp:
 
         self.connect_button.configure(state="disabled" if connected else "normal")
         self.disconnect_button.configure(state="normal" if connected else "disabled")
-        self.send_button.configure(state="normal" if connected else "disabled")
-        self.invite_button.configure(state="normal" if connected else "disabled")
+        # Chat/invite become enabled only after username is accepted.
+        self.send_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
+        self.invite_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
         self.refresh_button.configure(state="normal" if connected else "disabled")
 
     def _connect(self) -> None:
@@ -177,7 +179,9 @@ class ArenaGuiApp:
 
         self.running = True
         self.username = username
+        self.username_confirmed = False
         self._set_connected_ui(True)
+        self.waiting_var.set("Submitting username...")
         self._append_log(f"[SYSTEM] Connected to {server_ip}:{server_port}")
 
         # Start socket receiver in background so GUI thread remains responsive.
@@ -200,6 +204,7 @@ class ArenaGuiApp:
             self.connection = None
 
         self.online_users = []
+        self.username_confirmed = False
         self._render_online_players()
         self.waiting_var.set("Not connected.")
         self._set_connected_ui(False)
@@ -255,7 +260,11 @@ class ArenaGuiApp:
 
         if msg_type == MessageType.ONLINE_USERS.value:
             self.online_users = payload.get("users", [])
+            # Username is considered accepted once server includes it in
+            # authoritative online users list.
+            self.username_confirmed = self.username in self.online_users
             self._render_online_players()
+            self._set_connected_ui(True)
 
             has_opponent = any(user != self.username for user in self.online_users)
             if has_opponent:
@@ -266,8 +275,45 @@ class ArenaGuiApp:
 
         if msg_type == MessageType.INVITATION.value:
             from_user = payload.get("from_user", "Unknown")
-            self._append_log(f"[INVITATION] {from_user} invited you to play.")
-            messagebox.showinfo("Invitation Received", f"{from_user} wants to play with you.")
+            to_user = payload.get("to_user", "")
+            action = payload.get("action", "").lower()
+
+            if action == "send":
+                # PBI invitation UX: target player can accept or decline.
+                self._append_log(f"[INVITATION] {from_user} invited you to play.")
+                accepted = messagebox.askyesno(
+                    "Invitation Received",
+                    f"{from_user} wants to play with you.\n\nDo you accept?",
+                )
+
+                if self.connection is not None:
+                    response_action = "accept" if accepted else "decline"
+                    self.connection.send_message(
+                        make_invitation_message(
+                            from_user=from_user,
+                            to_user=self.username,
+                            action=response_action,
+                        )
+                    )
+                    self._append_log(
+                        f"[INVITATION] You {response_action}ed invitation from {from_user}."
+                    )
+                return
+
+            if action in {"accepted", "declined", "cancelled"}:
+                # Decision updates from server for both involved players.
+                self._append_log(f"[INVITATION] {from_user} -> {to_user}: {action}")
+                messagebox.showinfo("Invitation Update", f"Invitation status: {action}")
+                return
+
+            if action == "match_started":
+                game_id = payload.get("game_id", "unknown")
+                self._append_log(f"[MATCH] Started for {from_user} vs {to_user} (game_id={game_id})")
+                messagebox.showinfo("Match Started", f"Game started! ID: {game_id}")
+                return
+
+            # Fallback for any unknown invitation action.
+            self._append_log(f"[INVITATION] {payload}")
             return
 
         if msg_type == MessageType.CHAT.value:
@@ -278,6 +324,30 @@ class ArenaGuiApp:
 
         if msg_type == MessageType.ERROR.value:
             self._append_log(f"[ERROR] {payload.get('message', 'Unknown error')} - {payload.get('details', '')}")
+
+            # If username is rejected as taken, force user to enter another.
+            # Keep connection alive and retry registration immediately.
+            if "Username already taken" in payload.get("message", ""):
+                new_username = simpledialog.askstring(
+                    "Username Taken",
+                    "This username is already in use.\nPlease enter a different username:",
+                    parent=self.root,
+                )
+                if new_username is None:
+                    self._append_log("[SYSTEM] Username change cancelled. Disconnecting.")
+                    self._disconnect()
+                    return
+
+                candidate = new_username.strip()
+                is_valid, validation_message = validate_username(candidate)
+                if not is_valid:
+                    messagebox.showerror("Invalid Username", validation_message)
+                    return
+
+                self.username = candidate
+                if self.connection is not None:
+                    self.connection.send_message(make_username_message(candidate))
+                    self._append_log(f"[SYSTEM] Retrying username: {candidate}")
             return
 
         self._append_log(f"[INCOMING] {message}")
