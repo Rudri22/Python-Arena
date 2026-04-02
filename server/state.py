@@ -18,6 +18,7 @@ from server.game_engine import (
     MatchRuntime,
     create_match_runtime,
     queue_direction,
+    should_step,
     step_runtime,
     to_protocol_state,
 )
@@ -114,11 +115,14 @@ class ServerState:
             if owner_id == client_id:
                 self._username_to_client.pop(_normalize_username(previous_username), None)
 
-            game_id = self._user_to_match.get(previous_username)
+            game_id = self._find_game_id_for_user_locked(previous_username)
             if game_id is not None:
                 players = self._active_matches.get(game_id)
                 if players is not None:
-                    opponent = players[0] if players[1] == previous_username else players[1]
+                    if len(players) == 2:
+                        opponent = players[0] if players[1] == previous_username else players[1]
+                    else:
+                        opponent = "draw"
                     events.append(
                         {
                             "type": "match_abandoned",
@@ -348,7 +352,7 @@ class ServerState:
             games_to_cleanup: list[str] = []
 
             for game_id, runtime in list(self._match_runtimes.items()):
-                if runtime.status == "running":
+                if runtime.status == "running" and should_step(runtime):
                     step_runtime(runtime)
 
                 players = self._active_matches.get(game_id)
@@ -487,3 +491,20 @@ class ServerState:
             return
         for player in players:
             self._user_to_match.pop(player, None)
+
+    def _find_game_id_for_user_locked(self, username: str) -> str | None:
+        """
+        Resolve a user's active game id while holding lock.
+
+        Uses both direct mapping and active-match scan to tolerate ordering
+        races between disconnect cleanup and match lifecycle cleanup.
+        """
+
+        game_id = self._user_to_match.get(username)
+        if game_id is not None:
+            return game_id
+
+        for candidate_game_id, players in self._active_matches.items():
+            if username in players:
+                return candidate_game_id
+        return None
