@@ -9,6 +9,7 @@ This module combines:
 from __future__ import annotations
 
 import socket
+import time
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
@@ -18,6 +19,7 @@ from server.game_engine import (
     MatchRuntime,
     create_match_runtime,
     queue_direction,
+    should_step,
     step_runtime,
     to_protocol_state,
 )
@@ -63,6 +65,8 @@ class ServerState:
 
     # Sprint 3 authoritative match runtime (game_id -> runtime state).
     _match_runtimes: dict[str, MatchRuntime] = field(default_factory=dict)
+    # Short-lived handoff window to allow GUI->Pygame reconnect without ending match.
+    _match_handoff_until: dict[str, float] = field(default_factory=dict)
 
     _lock: Lock = field(default_factory=Lock)
 
@@ -116,6 +120,11 @@ class ServerState:
 
             game_id = self._find_game_id_for_user_locked(previous_username)
             if game_id is not None:
+                if self._is_handoff_active_locked(game_id):
+                    # Intentional GUI->Pygame switch in progress; keep match alive.
+                    self._cleanup_user_invites_locked(previous_username)
+                    return events
+
                 players = self._active_matches.get(game_id)
                 if players is not None:
                     if len(players) == 2:
@@ -146,7 +155,20 @@ class ServerState:
             normalized_username = _normalize_username(username)
             existing_owner = self._username_to_client.get(normalized_username)
             if existing_owner is not None and existing_owner != client_id:
-                return False, "username_taken"
+                if self._release_stale_username_owner_locked(normalized_username, existing_owner):
+                    existing_owner = self._username_to_client.get(normalized_username)
+
+            if existing_owner is not None and existing_owner != client_id:
+                if not self._can_reclaim_username_for_handoff_locked(normalized_username, existing_owner):
+                    return False, "username_taken"
+
+                # Handoff reclaim: release old owner mapping so reconnecting
+                # client can continue the same match without username deadlock.
+                self._username_to_client.pop(normalized_username, None)
+                if existing_owner in self._client_usernames:
+                    self._client_usernames[existing_owner] = None
+                if existing_owner in self._client_sockets:
+                    self._client_sockets[existing_owner] = None
 
             previous_username = self._client_usernames[client_id]
             if previous_username is not None and previous_username != username:
@@ -213,6 +235,21 @@ class ServerState:
             self._busy_invite_users.add(from_user)
             self._busy_invite_users.add(to_user)
             return True, "pending"
+
+    def mark_match_handoff(self, username: str, ttl_seconds: float = 8.0) -> tuple[bool, str]:
+        """Mark an active match for short reconnect handoff (GUI -> Pygame)."""
+
+        with self._lock:
+            canonical_username = self._resolve_username(username)
+            if canonical_username is None:
+                return False, "user_offline"
+
+            game_id = self._user_to_match.get(canonical_username)
+            if game_id is None:
+                return False, "user_not_in_match"
+
+            self._match_handoff_until[game_id] = time.monotonic() + max(1.0, ttl_seconds)
+            return True, "handoff_marked"
 
     def respond_to_invitation(self, from_user: str, to_user: str, action: str) -> tuple[bool, str, str | None]:
         """
@@ -351,10 +388,11 @@ class ServerState:
             games_to_cleanup: list[str] = []
 
             for game_id, runtime in list(self._match_runtimes.items()):
+                self._cleanup_expired_handoff_locked(game_id)
                 # Sprint 5 PBI 5.1:
                 # Run authoritative simulation continuously on server tick,
                 # even when no fresh movement command arrived this frame.
-                if runtime.status == "running":
+                if runtime.status == "running" and should_step(runtime):
                     step_runtime(runtime)
 
                 players = self._active_matches.get(game_id)
@@ -460,11 +498,7 @@ class ServerState:
     def _cleanup_user_lobby_state(self, username: str) -> None:
         """Internal cleanup for invitation/match state linked to a user."""
 
-        invites_to_remove = [key for key in self._pending_invites if username in key]
-        for from_user, to_user in invites_to_remove:
-            self._pending_invites.pop((from_user, to_user), None)
-            self._busy_invite_users.discard(from_user)
-            self._busy_invite_users.discard(to_user)
+        self._cleanup_user_invites_locked(username)
 
         game_id = self._user_to_match.pop(username, None)
         if game_id is not None:
@@ -489,6 +523,7 @@ class ServerState:
 
         players = self._active_matches.pop(game_id, None)
         self._match_runtimes.pop(game_id, None)
+        self._match_handoff_until.pop(game_id, None)
         if players is None:
             return
         for player in players:
@@ -510,3 +545,64 @@ class ServerState:
             if username in players:
                 return candidate_game_id
         return None
+
+    def _cleanup_user_invites_locked(self, username: str) -> None:
+        """Remove pending invite state for one user while lock is held."""
+
+        invites_to_remove = [key for key in self._pending_invites if username in key]
+        for from_user, to_user in invites_to_remove:
+            self._pending_invites.pop((from_user, to_user), None)
+            self._busy_invite_users.discard(from_user)
+            self._busy_invite_users.discard(to_user)
+
+    def _is_handoff_active_locked(self, game_id: str) -> bool:
+        """Check if a match is currently in reconnect handoff grace window."""
+
+        until = self._match_handoff_until.get(game_id)
+        if until is None:
+            return False
+        return until > time.monotonic()
+
+    def _cleanup_expired_handoff_locked(self, game_id: str) -> None:
+        """Drop stale handoff metadata for a match when ttl elapsed."""
+
+        until = self._match_handoff_until.get(game_id)
+        if until is None:
+            return
+        if until <= time.monotonic():
+            self._match_handoff_until.pop(game_id, None)
+
+    def _can_reclaim_username_for_handoff_locked(self, normalized_username: str, owner_id: str) -> bool:
+        """Allow username reclaim only during an active handoff window."""
+
+        owner_username = self._client_usernames.get(owner_id)
+        if owner_username is None:
+            return False
+
+        if _normalize_username(owner_username) != normalized_username:
+            return False
+
+        owner_game_id = self._find_game_id_for_user_locked(owner_username)
+        if owner_game_id is None:
+            return False
+
+        return self._is_handoff_active_locked(owner_game_id)
+
+    def _release_stale_username_owner_locked(self, normalized_username: str, owner_id: str) -> bool:
+        """
+        Release username ownership when previous owner socket is already dead.
+
+        This prevents long-lived "username taken" loops after client-side
+        transitions where old sockets were closed but mapping cleanup raced.
+        """
+
+        owner_socket = self._client_sockets.get(owner_id)
+        if owner_socket is not None and owner_socket.fileno() != -1:
+            return False
+
+        self._username_to_client.pop(normalized_username, None)
+        if owner_id in self._client_usernames:
+            self._client_usernames[owner_id] = None
+        if owner_id in self._client_sockets:
+            self._client_sockets[owner_id] = None
+        return True
