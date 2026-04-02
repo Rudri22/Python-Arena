@@ -96,6 +96,79 @@ def _handle_invitation_message(
         send_message(client_socket, make_error_message("Username must be set before invitations."))
         return
 
+    if action == "spectate":
+        # Spectator join:
+        # - from_user must match connected sender
+        # - target can be resolved by `game_id` or `to_user` active match
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Spectator sender mismatch."))
+            return
+
+        requested_game_id = str(payload.get("game_id", "")).strip() or None
+        success, reason, resolved_game_id, players = server_state.add_spectator(
+            username=sender_username,
+            game_id=requested_game_id,
+            target_user=to_user,
+        )
+        if not success or resolved_game_id is None:
+            reason_to_error = {
+                "user_offline": "Spectator join failed: user is offline.",
+                "user_in_match": "You cannot spectate while in an active match.",
+                "match_not_found": "No active match found to spectate.",
+                "match_finished": "Cannot spectate a finished match.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Spectator join failed.")))
+            return
+
+        spectator_notice = make_invitation_message(
+            from_user="SERVER",
+            to_user=sender_username,
+            action="spectate_joined",
+            game_id=resolved_game_id,
+        )
+        send_message(client_socket, spectator_notice)
+
+        initial_state = server_state.get_match_state_dict(resolved_game_id)
+        if initial_state is not None:
+            send_message(
+                client_socket,
+                make_game_state_message(game_id=resolved_game_id, state=initial_state),
+            )
+
+        if players is not None:
+            send_message(
+                client_socket,
+                make_chat_message(
+                    sender="SERVER",
+                    message=f"Now spectating {players[0]} vs {players[1]} ({resolved_game_id}).",
+                ),
+            )
+        return
+
+    if action == "spectate_leave":
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Spectator sender mismatch."))
+            return
+
+        success, reason = server_state.remove_spectator(sender_username)
+        if not success:
+            reason_to_error = {
+                "user_offline": "Spectator leave failed: user is offline.",
+                "not_spectating": "You are not currently spectating any match.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Spectator leave failed.")))
+            return
+
+        send_message(
+            client_socket,
+            make_invitation_message(
+                from_user="SERVER",
+                to_user=sender_username,
+                action="spectate_left",
+            ),
+        )
+        return
+
     if action == "send":
         # For "send", connected sender must match `from_user`.
         if from_user.casefold() != sender_username.casefold():
@@ -305,9 +378,9 @@ def _handle_movement_message(
         return
 
     # Sprint 4 PBI 4.12: broadcast updated state to active players only.
-    sockets = server_state.get_match_player_sockets(game_id)
+    sockets = server_state.get_match_session_sockets(game_id)
     if not sockets:
-        send_message(client_socket, make_error_message("Unable to resolve active match players."))
+        send_message(client_socket, make_error_message("Unable to resolve active match session recipients."))
         return
 
     # PBI 4.12 + PBI 3.12: broadcast packaged authoritative game state each update.
@@ -335,6 +408,117 @@ def _handle_movement_message(
                 send_message(sock, game_over_message)
             except OSError:
                 continue
+
+
+def _handle_chat_message(
+    client_socket: socket.socket,
+    payload: dict,
+    server_state: ServerState,
+    sender_client_id: str,
+) -> None:
+    """
+    Sprint 6 PBI 6.1 backend chat routing.
+
+    Supports:
+    - lobby-wide chat broadcast
+    - direct message delivery using optional `recipient`
+    """
+
+    sender_username = server_state.get_client_username(sender_client_id)
+    if sender_username is None:
+        send_message(client_socket, make_error_message("Username must be set before chat."))
+        return
+
+    claimed_sender = str(payload.get("sender", "")).strip()
+    if claimed_sender and claimed_sender.casefold() != sender_username.casefold():
+        send_message(client_socket, make_error_message("Chat sender mismatch."))
+        return
+
+    text = str(payload.get("message", "")).strip()
+    if not text:
+        send_message(client_socket, make_error_message("Chat message cannot be empty."))
+        return
+
+    recipient_raw = payload.get("recipient")
+    recipient = str(recipient_raw).strip() if recipient_raw is not None else ""
+    message_kind = str(payload.get("kind", "")).strip().lower()
+    is_cheer = message_kind == "cheer" or text.lower().startswith("/cheer")
+
+    if is_cheer:
+        cheer_text = text
+        if cheer_text.lower().startswith("/cheer"):
+            cheer_text = cheer_text[6:].strip(" :-")
+        if not cheer_text:
+            cheer_text = "Let's go!"
+
+        requested_game_id = str(payload.get("game_id", "")).strip() or None
+        target_user = str(payload.get("target_user", "")).strip() or None
+        if target_user is None and recipient:
+            # If client reused private-chat target while cheering, treat that
+            # target as a match lookup hint instead of a direct DM recipient.
+            target_user = recipient
+
+        success, reason, resolved_game_id, players = server_state.resolve_live_match_for_interaction(
+            sender_username,
+            game_id=requested_game_id,
+            target_user=target_user,
+        )
+        if not success or resolved_game_id is None:
+            reason_to_error = {
+                "user_offline": "Cheer failed: user offline.",
+                "match_not_found": "Cheer failed: no active match to cheer for.",
+                "match_finished": "Cheer failed: match already finished.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Cheer failed.")))
+            return
+
+        cheer_message = make_chat_message(
+            sender=sender_username,
+            message=f"[CHEER] {cheer_text}",
+        )
+        cheer_message["payload"]["kind"] = "cheer"
+        cheer_message["payload"]["game_id"] = resolved_game_id
+        if players is not None:
+            cheer_message["payload"]["players"] = list(players)
+
+        sockets = server_state.get_match_session_sockets(resolved_game_id)
+        if not sockets:
+            send_message(client_socket, make_error_message("Cheer failed: match recipients unavailable."))
+            return
+
+        for sock in sockets:
+            try:
+                send_message(sock, cheer_message)
+            except OSError:
+                continue
+        return
+
+    if recipient:
+        target_socket = server_state.get_socket_for_username(recipient)
+        if target_socket is None:
+            send_message(client_socket, make_error_message(f"User '{recipient}' is not online."))
+            return
+
+        chat_message = make_chat_message(sender=sender_username, message=text, recipient=recipient)
+        try:
+            send_message(target_socket, chat_message)
+        except OSError:
+            send_message(client_socket, make_error_message(f"Failed to deliver message to '{recipient}'."))
+            return
+
+        if recipient.casefold() != sender_username.casefold():
+            try:
+                send_message(client_socket, chat_message)
+            except OSError:
+                pass
+        return
+
+    chat_message = make_chat_message(sender=sender_username, message=text)
+    for sock in server_state.get_client_sockets():
+        try:
+            send_message(sock, chat_message)
+        except OSError:
+            continue
 
 
 def handle_incoming_message(
@@ -397,9 +581,12 @@ def handle_incoming_message(
         return
 
     if message_type == MessageType.CHAT.value:
-        # Keep chat echo path for baseline communication checks.
-        response = make_chat_message(sender="SERVER", message=f"Echo: {payload['message']}")
-        send_message(client_socket, response)
+        _handle_chat_message(
+            client_socket=client_socket,
+            payload=payload,
+            server_state=server_state,
+            sender_client_id=client_id,
+        )
         return
 
     # Default acknowledgement for unhandled message types.
@@ -466,6 +653,7 @@ def handle_client_connection(
         if event.get("type") != "match_abandoned":
             continue
         players = event.get("players", ())
+        spectators = event.get("spectators", ())
         winner = str(event.get("winner", "draw"))
         disconnected_player = str(event.get("disconnected_player", "unknown"))
         game_id = str(event.get("game_id", "unknown"))
@@ -476,10 +664,11 @@ def handle_client_connection(
             final_scores=final_scores,
             reason=f"disconnect:{disconnected_player}",
         )
-        for player in players:
-            if player == disconnected_player:
+        recipients = [*players, *spectators]
+        for user in recipients:
+            if user == disconnected_player:
                 continue
-            sock = server_state.get_socket_for_username(player)
+            sock = server_state.get_socket_for_username(str(user))
             if sock is None:
                 continue
             try:

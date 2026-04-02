@@ -62,6 +62,8 @@ class ServerState:
     _busy_invite_users: set[str] = field(default_factory=set)
     _active_matches: dict[str, tuple[str, str]] = field(default_factory=dict)
     _user_to_match: dict[str, str] = field(default_factory=dict)
+    _match_spectators: dict[str, set[str]] = field(default_factory=dict)
+    _user_to_spectated_match: dict[str, str] = field(default_factory=dict)
 
     # Sprint 3 authoritative match runtime (game_id -> runtime state).
     _match_runtimes: dict[str, MatchRuntime] = field(default_factory=dict)
@@ -102,7 +104,13 @@ class ServerState:
         Sprint 5 PBI 5.4 + 5.5: unregister and return disconnect-driven events.
 
         Event shape:
-        - {"type": "match_abandoned", "game_id": str, "players": (p1, p2), "winner": str}
+        - {
+            "type": "match_abandoned",
+            "game_id": str,
+            "players": (p1, p2),
+            "spectators": (s1, s2, ...),
+            "winner": str
+          }
         """
 
         with self._lock:
@@ -127,6 +135,7 @@ class ServerState:
 
                 players = self._active_matches.get(game_id)
                 if players is not None:
+                    spectators = tuple(sorted(self._match_spectators.get(game_id, set()), key=str.casefold))
                     if len(players) == 2:
                         opponent = players[0] if players[1] == previous_username else players[1]
                     else:
@@ -136,6 +145,7 @@ class ServerState:
                             "type": "match_abandoned",
                             "game_id": game_id,
                             "players": players,
+                            "spectators": spectators,
                             "winner": opponent,
                             "disconnected_player": previous_username,
                         }
@@ -302,6 +312,115 @@ class ServerState:
 
             return False, "invalid_action", None
 
+    def add_spectator(
+        self,
+        username: str,
+        *,
+        game_id: str | None = None,
+        target_user: str | None = None,
+    ) -> tuple[bool, str, str | None, tuple[str, str] | None]:
+        """
+        Sprint 6 PBI 6.2: attach one connected idle user to spectate a match.
+
+        Match resolution strategy:
+        - direct `game_id` when provided
+        - otherwise resolve from `target_user` active match
+        """
+
+        with self._lock:
+            spectator = self._resolve_username(username)
+            if spectator is None:
+                return False, "user_offline", None, None
+
+            # Active players cannot spectate another game simultaneously.
+            if spectator in self._user_to_match:
+                return False, "user_in_match", None, None
+
+            resolved_game_id = game_id
+            if resolved_game_id is None:
+                canonical_target = self._resolve_username(target_user or "")
+                if canonical_target is not None:
+                    resolved_game_id = self._user_to_match.get(canonical_target)
+
+            if resolved_game_id is None:
+                return False, "match_not_found", None, None
+
+            players = self._active_matches.get(resolved_game_id)
+            runtime = self._match_runtimes.get(resolved_game_id)
+            if players is None or runtime is None:
+                return False, "match_not_found", None, None
+            if runtime.status == "finished":
+                return False, "match_finished", None, None
+
+            previous_game_id = self._user_to_spectated_match.get(spectator)
+            if previous_game_id == resolved_game_id:
+                return True, "already_spectating", resolved_game_id, players
+            if previous_game_id is not None:
+                self._remove_spectator_locked(spectator)
+
+            spectators = self._match_spectators.setdefault(resolved_game_id, set())
+            spectators.add(spectator)
+            self._user_to_spectated_match[spectator] = resolved_game_id
+            return True, "spectating", resolved_game_id, players
+
+    def remove_spectator(self, username: str) -> tuple[bool, str]:
+        """Detach one spectator session from any currently spectated match."""
+
+        with self._lock:
+            spectator = self._resolve_username(username)
+            if spectator is None:
+                return False, "user_offline"
+            removed = self._remove_spectator_locked(spectator)
+            if not removed:
+                return False, "not_spectating"
+            return True, "removed"
+
+    def resolve_live_match_for_interaction(
+        self,
+        username: str,
+        *,
+        game_id: str | None = None,
+        target_user: str | None = None,
+    ) -> tuple[bool, str, str | None, tuple[str, str] | None]:
+        """
+        Sprint 6 PBI 6.4 helper: resolve one running match for fan interactions.
+
+        Resolution order:
+        - explicit `game_id`
+        - active match of `target_user`
+        - sender's own active match
+        - sender's current spectated match
+        """
+
+        with self._lock:
+            actor = self._resolve_username(username)
+            if actor is None:
+                return False, "user_offline", None, None
+
+            resolved_game_id = game_id
+            if resolved_game_id is None and target_user:
+                canonical_target = self._resolve_username(target_user)
+                if canonical_target is not None:
+                    resolved_game_id = self._user_to_match.get(canonical_target)
+
+            if resolved_game_id is None:
+                resolved_game_id = self._user_to_match.get(actor)
+
+            if resolved_game_id is None:
+                resolved_game_id = self._user_to_spectated_match.get(actor)
+
+            if resolved_game_id is None:
+                return False, "match_not_found", None, None
+
+            players = self._active_matches.get(resolved_game_id)
+            runtime = self._match_runtimes.get(resolved_game_id)
+            if players is None or runtime is None:
+                return False, "match_not_found", None, None
+            if runtime.status != "running":
+                return False, "match_finished", None, players
+
+            return True, "ok", resolved_game_id, players
+
     def get_match_players(self, game_id: str) -> tuple[str, str] | None:
         """Return both usernames assigned to one game id."""
 
@@ -418,6 +537,17 @@ class ServerState:
                     {
                         "game_id": game_id,
                         "players": players,
+                        "spectators": tuple(sorted(self._match_spectators.get(game_id, set()), key=str.casefold)),
+                        "recipients": tuple(
+                            [
+                                *players,
+                                *[
+                                    user
+                                    for user in sorted(self._match_spectators.get(game_id, set()), key=str.casefold)
+                                    if user not in players
+                                ],
+                            ]
+                        ),
                         "state": to_protocol_state(runtime),
                         "game_over": game_over_payload,
                     }
@@ -488,6 +618,32 @@ class ServerState:
                     sockets.append(sock)
             return sockets
 
+    def get_match_session_sockets(self, game_id: str) -> list[socket.socket]:
+        """
+        Sprint 6 PBI 6.2 helper: resolve sockets for players + spectators.
+
+        This allows gameplay state broadcasts to include spectator sessions.
+        """
+
+        with self._lock:
+            participants: list[str] = []
+            players = self._active_matches.get(game_id)
+            if players is not None:
+                participants.extend(list(players))
+            participants.extend(sorted(self._match_spectators.get(game_id, set()), key=str.casefold))
+
+            sockets: list[socket.socket] = []
+            seen_client_ids: set[str] = set()
+            for username in participants:
+                client_id = self._username_to_client.get(_normalize_username(username))
+                if client_id is None or client_id in seen_client_ids:
+                    continue
+                seen_client_ids.add(client_id)
+                sock = self._client_sockets.get(client_id)
+                if sock is not None:
+                    sockets.append(sock)
+            return sockets
+
     def get_idle_users(self) -> list[str]:
         """Sprint 5 PBI 5.3: list online users who are not in active matches."""
 
@@ -498,6 +654,7 @@ class ServerState:
     def _cleanup_user_lobby_state(self, username: str) -> None:
         """Internal cleanup for invitation/match state linked to a user."""
 
+        self._remove_spectator_locked(username)
         self._cleanup_user_invites_locked(username)
 
         game_id = self._user_to_match.pop(username, None)
@@ -524,10 +681,30 @@ class ServerState:
         players = self._active_matches.pop(game_id, None)
         self._match_runtimes.pop(game_id, None)
         self._match_handoff_until.pop(game_id, None)
+        spectators = tuple(self._match_spectators.pop(game_id, set()))
+        for spectator in spectators:
+            if self._user_to_spectated_match.get(spectator) == game_id:
+                self._user_to_spectated_match.pop(spectator, None)
         if players is None:
             return
         for player in players:
             self._user_to_match.pop(player, None)
+
+    def _remove_spectator_locked(self, username: str) -> bool:
+        """Remove one user from spectator tracking while lock is held."""
+
+        game_id = self._user_to_spectated_match.pop(username, None)
+        if game_id is None:
+            return False
+
+        spectators = self._match_spectators.get(game_id)
+        if spectators is None:
+            return True
+
+        spectators.discard(username)
+        if not spectators:
+            self._match_spectators.pop(game_id, None)
+        return True
 
     def _find_game_id_for_user_locked(self, username: str) -> str | None:
         """
