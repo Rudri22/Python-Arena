@@ -19,7 +19,6 @@ from server.game_engine import (
     MatchRuntime,
     create_match_runtime,
     queue_direction,
-    should_step,
     step_runtime,
     to_protocol_state,
 )
@@ -511,7 +510,7 @@ class ServerState:
                 # Sprint 5 PBI 5.1:
                 # Run authoritative simulation continuously on server tick,
                 # even when no fresh movement command arrived this frame.
-                if runtime.status == "running" and should_step(runtime):
+                if runtime.status == "running":
                     step_runtime(runtime)
 
                 players = self._active_matches.get(game_id)

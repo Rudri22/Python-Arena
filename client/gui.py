@@ -511,7 +511,11 @@ class ArenaGuiApp:
         if msg_type == MessageType.CHAT.value:
             sender = payload.get("sender", "SERVER")
             text = payload.get("message", "")
+            scope = str(payload.get("scope", "")).strip().lower()
             recipient = payload.get("recipient")
+            if scope == "match":
+                # Keep in-match chat isolated to the Pygame gameplay window.
+                return
             if recipient:
                 if str(sender).casefold() == self.username.casefold():
                     private_tab = str(recipient)

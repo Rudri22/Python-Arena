@@ -226,6 +226,8 @@ class PygameArenaWindow:
                     self.running = False
                 elif event.key == pygame.K_c:
                     self._send_cheer()
+                elif event.key == pygame.K_q and self.spectator_mode:
+                    self._leave_spectator_mode()
                 elif event.key == pygame.K_t:
                     self.chat_typing = True
                 self._handle_direction_input(event.key)
@@ -262,7 +264,7 @@ class PygameArenaWindow:
         return False
 
     def _submit_chat_message(self) -> None:
-        """Send chat message to server and append local echo."""
+        """Send chat message to server."""
 
         text = self.chat_input.strip()
         self.chat_typing = False
@@ -273,7 +275,6 @@ class PygameArenaWindow:
             return
         try:
             self.connection.send_message(make_chat_message(sender=self.username, message=text))
-            self.chat_messages.append(f"You: {text}")
         except OSError:
             self.chat_messages.append("[CHAT] Failed to send message.")
 
@@ -291,6 +292,28 @@ class PygameArenaWindow:
             self.connection.send_message(cheer_message)
         except OSError:
             self.chat_messages.append("[CHAT] Cheer send failed.")
+
+    def _leave_spectator_mode(self) -> None:
+        """Allow spectator to leave immediately and return to lobby."""
+
+        if not self.spectator_mode:
+            return
+
+        if self.connection is not None:
+            try:
+                self.connection.send_message(
+                    make_invitation_message(
+                        from_user=self.username,
+                        to_user=self.pending_spectate_to or self.username,
+                        action="spectate_leave",
+                    )
+                )
+            except OSError:
+                # Even if leave message fails, return user to lobby immediately.
+                pass
+
+        self.return_to_lobby_requested = True
+        self.running = False
 
     def _handle_direction_input(self, key: int) -> None:
         """Handle local player movement direction input."""
@@ -453,6 +476,18 @@ class PygameArenaWindow:
             # Sprint 6 PBI 6.7: display incoming chat stream in gameplay view.
             sender = str(payload.get("sender", "SERVER"))
             text = str(payload.get("message", ""))
+            scope = str(payload.get("scope", "")).lower()
+            message_game_id = str(payload.get("game_id", ""))
+
+            # Keep lobby chat out of in-match UI.
+            if scope == "lobby":
+                return
+
+            # Keep chat isolated to the active/spectated match.
+            if scope == "match" and self.active_game_id is not None:
+                if message_game_id and message_game_id != self.active_game_id:
+                    return
+
             self.chat_messages.append(f"{sender}: {text}")
             return
 
@@ -940,7 +975,7 @@ class PygameArenaWindow:
         """Sprint 6 PBI 6.8: show explicit mode state in gameplay header."""
 
         if self.spectator_mode:
-            label = "SPECTATOR MODE - watching live board"
+            label = "SPECTATOR MODE - Q to leave and return to lobby"
         else:
             label = "PLAYER MODE - WASD/Arrows to move"
         text = self.font_hint.render(label, True, ACCENT_COLOR)
