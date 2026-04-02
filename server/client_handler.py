@@ -513,7 +513,23 @@ def _handle_chat_message(
                 pass
         return
 
+    # Keep lobby chat and in-game chat separated:
+    # - if sender is in/spectating a live match, route to that session only
+    # - otherwise route to lobby-wide public chat
+    match_ok, _reason, resolved_game_id, _players = server_state.resolve_live_match_for_interaction(sender_username)
+    if match_ok and resolved_game_id is not None:
+        chat_message = make_chat_message(sender=sender_username, message=text)
+        chat_message["payload"]["scope"] = "match"
+        chat_message["payload"]["game_id"] = resolved_game_id
+        for sock in server_state.get_match_session_sockets(resolved_game_id):
+            try:
+                send_message(sock, chat_message)
+            except OSError:
+                continue
+        return
+
     chat_message = make_chat_message(sender=sender_username, message=text)
+    chat_message["payload"]["scope"] = "lobby"
     for sock in server_state.get_client_sockets():
         try:
             send_message(sock, chat_message)
