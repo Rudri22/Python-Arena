@@ -143,6 +143,17 @@ def _run_game_loop(server_state: ServerState) -> None:
                 except OSError:
                     continue
 
+            # Sprint 6 spectator compatibility:
+            # Also publish live game-state snapshots to all connected clients
+            # so non-player viewers can observe active matches.
+            for sock in server_state.get_client_sockets():
+                if sock in sockets:
+                    continue
+                try:
+                    _send_socket_message(sock, game_state_message)
+                except OSError:
+                    continue
+
             game_over_payload = update.get("game_over")
             if game_over_payload is not None:
                 game_over_message = make_game_over_message(
@@ -152,6 +163,14 @@ def _run_game_loop(server_state: ServerState) -> None:
                     reason=str(game_over_payload.get("reason", "match_finished")),
                 )
                 for sock in sockets:
+                    try:
+                        _send_socket_message(sock, game_over_message)
+                    except OSError:
+                        continue
+                # Keep spectators in sync with match completion.
+                for sock in server_state.get_client_sockets():
+                    if sock in sockets:
+                        continue
                     try:
                         _send_socket_message(sock, game_over_message)
                     except OSError:

@@ -80,6 +80,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Launch Sprint 4 Pygame gameplay window.",
     )
+    parser.add_argument(
+        "--spectator",
+        action="store_true",
+        help="Launch Pygame in spectator mode (view-only).",
+    )
 
     return parser.parse_args()
 
@@ -222,8 +227,11 @@ def main() -> None:
     if args.gui and args.pygame:
         show_system("Choose only one UI mode: --gui or --pygame.")
         raise SystemExit(1)
+    if args.gui and args.spectator:
+        show_system("Spectator mode is available only with --pygame.")
+        raise SystemExit(1)
 
-    if args.pygame:
+    if args.pygame or args.spectator:
         # Import lazily so terminal mode does not require pygame at import-time.
         from client.game_window import main as pygame_main
 
@@ -239,11 +247,21 @@ def main() -> None:
             show_system(f"Invalid client arguments: {error}")
             raise SystemExit(1) from error
 
-        pygame_main(
-            server_ip=args.server_ip,
-            server_port=args.server_port,
-            username=pygame_username,
-        )
+        # Keep compatibility with older game_window.main signatures that may
+        # not yet accept the spectator_mode keyword.
+        if args.spectator:
+            pygame_main(
+                server_ip=args.server_ip,
+                server_port=args.server_port,
+                username=pygame_username,
+                spectator_mode=True,
+            )
+        else:
+            pygame_main(
+                server_ip=args.server_ip,
+                server_port=args.server_port,
+                username=pygame_username,
+            )
         return
 
     if args.gui:
