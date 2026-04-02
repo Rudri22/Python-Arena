@@ -36,7 +36,8 @@ WINDOW_WIDTH = 1220
 WINDOW_HEIGHT = 780
 WINDOW_TITLE = "Python-Arena - Sprint 4"
 TARGET_FPS = 60
-MOVE_INTERVAL_MS = 220
+MOVE_INTERVAL_MS = 120
+STATE_INTERPOLATION_MS = 120
 BOARD_COLS = 28
 BOARD_ROWS = 24
 CELL_SIZE = 24
@@ -62,6 +63,8 @@ PIE_COLOR = (236, 83, 99)
 PIE_HIGHLIGHT_COLOR = (255, 158, 170)
 OBSTACLE_COLOR = (121, 134, 153)
 OBSTACLE_EDGE_COLOR = (175, 189, 210)
+ERROR_PANEL_COLOR = (72, 30, 30)
+ERROR_TEXT_COLOR = (255, 210, 210)
 _DIRECTIONS: dict[str, tuple[int, int]] = {
     "up": (0, -1),
     "down": (0, 1),
@@ -107,9 +110,18 @@ class PygameArenaWindow:
         self.match_winner = "-"
         self.timer_remaining = 0
         self.timer_elapsed = 0
+        self.connection_healthy = True
+        self.connection_notice = ""
         self.player_a_name = "Snake A"
         self.player_b_name = "Snake B"
         self.last_game_state_ms = 0
+        self.state_interp_start_ms = 0
+        self.render_snake_a: list[tuple[float, float]] = []
+        self.render_snake_b: list[tuple[float, float]] = []
+        self.interp_from_snake_a: list[tuple[float, float]] = []
+        self.interp_from_snake_b: list[tuple[float, float]] = []
+        self.interp_to_snake_a: list[tuple[float, float]] = []
+        self.interp_to_snake_b: list[tuple[float, float]] = []
         self.show_result_screen = False
         self.result_winner = "-"
         self.result_reason = "-"
@@ -129,6 +141,8 @@ class PygameArenaWindow:
         # PBI 4.3 baseline snake rendering (authoritative state integration follows in next PBIs).
         self.snake_a: list[tuple[int, int]] = [(3, 9), (2, 9), (1, 9)]
         self.snake_b: list[tuple[int, int]] = [(16, 11), (17, 11), (18, 11)]
+        self.render_snake_a = [(float(x), float(y)) for x, y in self.snake_a]
+        self.render_snake_b = [(float(x), float(y)) for x, y in self.snake_b]
         self.snake_a_direction = "right"
         self.snake_b_direction = "left"
         self.snake_a_health = 100
@@ -193,7 +207,7 @@ class PygameArenaWindow:
         try:
             self.connection = ClientConnection(server_ip=self.server_ip, server_port=self.server_port)
         except Exception as error:
-            self.last_server_message = f"Offline mode ({error})"
+            self._mark_connection_issue(f"Unable to connect: {error}")
             self.connection = None
             return
 
@@ -221,7 +235,7 @@ class PygameArenaWindow:
             except Exception as error:
                 self.incoming_queue.put(
                     {
-                        "type": MessageType.ERROR.value,
+                        "type": "socket_error",
                         "payload": {"message": f"Connection closed: {error}"},
                     }
                 )
@@ -309,7 +323,26 @@ class PygameArenaWindow:
             message_text = str(payload.get("message", "")).lower()
             if "movement" in message_text or "match" in message_text or "active match" in message_text:
                 self.rejected_movement_commands += 1
+            if (
+                "connection" in message_text
+                or "disconnect" in message_text
+                or "closed" in message_text
+            ):
+                self._mark_connection_issue(str(payload.get("message", "Connection issue.")))
             return
+
+        if msg_type == "socket_error":
+            self._mark_connection_issue(str(payload.get("message", "Lost connection to server.")))
+            return
+
+    def _mark_connection_issue(self, message: str) -> None:
+        """Switch UI to graceful disconnected/error state."""
+
+        self.connection_healthy = False
+        self.connection_notice = message
+        self.last_server_message = message
+        self.match_status = "disconnected"
+        self._disconnect_from_server()
 
     def _maybe_send_auto_invite(self) -> None:
         """Auto-invite one available opponent to bootstrap a playable match."""
@@ -337,6 +370,8 @@ class PygameArenaWindow:
     def _sync_from_game_state(self, state: dict) -> None:
         """Update rendered board entities from authoritative backend state."""
 
+        old_snake_a = list(self.snake_a)
+        old_snake_b = list(self.snake_b)
         snakes = state.get("snakes", [])
         my_snake = None
         opponent_snake = None
@@ -388,11 +423,74 @@ class PygameArenaWindow:
         self.timer_elapsed = int(timer.get("elapsed_seconds", self.timer_elapsed))
         self.match_status = str(state.get("status", self.match_status))
         self.match_winner = str(state.get("winner", self.match_winner or "-"))
+        self._start_state_interpolation(old_snake_a, old_snake_b)
+
+    def _start_state_interpolation(
+        self,
+        old_snake_a: list[tuple[int, int]],
+        old_snake_b: list[tuple[int, int]],
+    ) -> None:
+        """Prepare linear interpolation between previous and latest server snakes."""
+
+        def to_float_cells(cells: list[tuple[int, int]]) -> list[tuple[float, float]]:
+            return [(float(x), float(y)) for x, y in cells]
+
+        to_a = to_float_cells(self.snake_a)
+        to_b = to_float_cells(self.snake_b)
+
+        if len(self.render_snake_a) == len(to_a) and self.render_snake_a:
+            from_a = list(self.render_snake_a)
+        else:
+            from_a = to_float_cells(old_snake_a if old_snake_a else self.snake_a)
+
+        if len(self.render_snake_b) == len(to_b) and self.render_snake_b:
+            from_b = list(self.render_snake_b)
+        else:
+            from_b = to_float_cells(old_snake_b if old_snake_b else self.snake_b)
+
+        if len(from_a) != len(to_a):
+            from_a = list(to_a)
+        if len(from_b) != len(to_b):
+            from_b = list(to_b)
+
+        self.interp_from_snake_a = from_a
+        self.interp_from_snake_b = from_b
+        self.interp_to_snake_a = to_a
+        self.interp_to_snake_b = to_b
+        self.state_interp_start_ms = pygame.time.get_ticks()
+        self.render_snake_a = list(from_a)
+        self.render_snake_b = list(from_b)
+
+    def _update_interpolated_snakes(self) -> None:
+        """Smoothly interpolate rendered snake cells toward latest server state."""
+
+        if not self.interp_to_snake_a and not self.interp_to_snake_b:
+            return
+
+        if STATE_INTERPOLATION_MS <= 0:
+            t = 1.0
+        else:
+            elapsed = pygame.time.get_ticks() - self.state_interp_start_ms
+            t = max(0.0, min(1.0, elapsed / STATE_INTERPOLATION_MS))
+
+        def lerp_cells(
+            start_cells: list[tuple[float, float]],
+            end_cells: list[tuple[float, float]],
+        ) -> list[tuple[float, float]]:
+            if len(start_cells) != len(end_cells):
+                return list(end_cells)
+            return [
+                (sx + (ex - sx) * t, sy + (ey - sy) * t)
+                for (sx, sy), (ex, ey) in zip(start_cells, end_cells)
+            ]
+
+        self.render_snake_a = lerp_cells(self.interp_from_snake_a, self.interp_to_snake_a)
+        self.render_snake_b = lerp_cells(self.interp_from_snake_b, self.interp_to_snake_b)
 
     def _update_movement(self) -> None:
         """Update local movement at a fixed interval and send input to backend."""
 
-        if self.show_result_screen:
+        if self.show_result_screen or not self.connection_healthy:
             return
 
         now = pygame.time.get_ticks()
@@ -400,10 +498,13 @@ class PygameArenaWindow:
             return
 
         self.last_move_ms = now
-        self._step_local_physics()
-        self._check_local_game_over()
-        if self.show_result_screen:
-            return
+        # Once authoritative states are flowing, avoid local preview simulation
+        # to prevent jitter from competing state sources.
+        if not self.has_authoritative_state:
+            self._step_local_physics()
+            self._check_local_game_over()
+            if self.show_result_screen:
+                return
         self._send_movement_command(self.snake_a_direction)
 
     def _send_movement_command(self, direction: str) -> None:
@@ -428,8 +529,8 @@ class PygameArenaWindow:
             )
             self.sent_movement_commands += 1
             self.last_sent_direction = direction
-        except OSError:
-            self.last_server_message = "Failed to send movement"
+        except OSError as error:
+            self._mark_connection_issue(f"Failed to send movement: {error}")
 
     def _step_local_physics(self) -> None:
         """
@@ -610,8 +711,28 @@ class PygameArenaWindow:
         self._draw_pies()
         self._draw_snakes()
         self._draw_health_scores()
+        self._draw_connection_notice()
         if self.show_result_screen:
             self._draw_result_screen()
+
+    def _draw_connection_notice(self) -> None:
+        """Draw non-intrusive but clear disconnect/error notice."""
+
+        if self.connection_healthy:
+            return
+
+        panel = pygame.Rect(840, 600, 300, 90)
+        pygame.draw.rect(self.screen, ERROR_PANEL_COLOR, panel, border_radius=10)
+        pygame.draw.rect(self.screen, ACCENT_COLOR, panel, width=2, border_radius=10)
+
+        title = self.font_score_label.render("Connection Issue", True, ERROR_TEXT_COLOR)
+        detail_text = self.connection_notice or "Disconnected from server."
+        detail = self.font_hint.render(detail_text[:56], True, ERROR_TEXT_COLOR)
+        hint = self.font_hint.render("Reconnect server and relaunch client.", True, SUBTEXT_COLOR)
+
+        self.screen.blit(title, (854, 612))
+        self.screen.blit(detail, (854, 637))
+        self.screen.blit(hint, (854, 660))
 
     def _draw_board(self) -> None:
         """Draw a 20x20 arena board with visible cell grid."""
@@ -650,12 +771,26 @@ class PygameArenaWindow:
     def _draw_snakes(self) -> None:
         """Render both snakes on top of the board grid."""
 
-        self._draw_single_snake(self.snake_a, SNAKE_A_BODY_COLOR, SNAKE_A_HEAD_COLOR)
-        self._draw_single_snake(self.snake_b, SNAKE_B_BODY_COLOR, SNAKE_B_HEAD_COLOR)
+        if not self.has_authoritative_state:
+            self._draw_single_snake(
+                [(float(x), float(y)) for x, y in self.snake_a],
+                SNAKE_A_BODY_COLOR,
+                SNAKE_A_HEAD_COLOR,
+            )
+            self._draw_single_snake(
+                [(float(x), float(y)) for x, y in self.snake_b],
+                SNAKE_B_BODY_COLOR,
+                SNAKE_B_HEAD_COLOR,
+            )
+            return
+
+        self._update_interpolated_snakes()
+        self._draw_single_snake(self.render_snake_a, SNAKE_A_BODY_COLOR, SNAKE_A_HEAD_COLOR)
+        self._draw_single_snake(self.render_snake_b, SNAKE_B_BODY_COLOR, SNAKE_B_HEAD_COLOR)
 
     def _draw_single_snake(
         self,
-        snake_cells: list[tuple[int, int]],
+        snake_cells: list[tuple[float, float]],
         body_color: tuple[int, int, int],
         head_color: tuple[int, int, int],
     ) -> None:
@@ -664,8 +799,8 @@ class PygameArenaWindow:
         for index, (x, y) in enumerate(snake_cells):
             color = head_color if index == 0 else body_color
             cell_rect = pygame.Rect(
-                self.board_origin_x + (x * CELL_SIZE) + 2,
-                self.board_origin_y + (y * CELL_SIZE) + 2,
+                self.board_origin_x + int(round(x * CELL_SIZE)) + 2,
+                self.board_origin_y + int(round(y * CELL_SIZE)) + 2,
                 CELL_SIZE - 4,
                 CELL_SIZE - 4,
             )
