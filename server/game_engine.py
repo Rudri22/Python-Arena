@@ -31,8 +31,11 @@ BOARD_WIDTH = 20
 BOARD_HEIGHT = 20
 INITIAL_SNAKE_LENGTH = 3
 INITIAL_HEALTH = 100
-HEALTH_DECAY_PER_TICK = 1
-HEALTH_GAIN_PER_PIE = 15
+DEFAULT_PIE_HEALTH_GAIN = 15
+WALL_COLLISION_DAMAGE = 20
+OTHER_SNAKE_COLLISION_DAMAGE = 20
+SELF_COLLISION_DAMAGE = 20
+HEAD_TO_HEAD_DAMAGE = 25
 MAX_MATCH_TICKS = 300
 
 # Static obstacle layout (fixed coordinates as requested).
@@ -43,6 +46,11 @@ STATIC_OBSTACLES: tuple[tuple[int, int], ...] = (
     (10, 12),
     (5, 10),
     (14, 10),
+)
+
+PIE_TYPES: tuple[dict[str, object], ...] = (
+    {"kind": "apple", "health_delta": 15, "points": 15},
+    {"kind": "golden", "health_delta": 25, "points": 25},
 )
 
 _DIRECTIONS: dict[str, tuple[int, int]] = {
@@ -79,8 +87,8 @@ class MatchRuntime:
     game_id: str
     players: tuple[str, str]
     snakes: dict[str, SnakeRuntime]
-    obstacles: set[tuple[int, int]]
-    pies: set[tuple[int, int]]
+    obstacles: dict[tuple[int, int], dict[str, object]]
+    pies: dict[tuple[int, int], dict[str, object]]
     tick: int = 0
     max_ticks: int = MAX_MATCH_TICKS
     status: str = "running"
@@ -101,13 +109,13 @@ def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRun
 
     snake_a = SnakeRuntime(
         player=player_a,
-        body=[(3, 10), (2, 10), (1, 10)],
+        body=[(3, 9), (2, 9), (1, 9)],
         direction="right",
         next_direction="right",
     )
     snake_b = SnakeRuntime(
         player=player_b,
-        body=[(16, 10), (17, 10), (18, 10)],
+        body=[(16, 11), (17, 11), (18, 11)],
         direction="left",
         next_direction="left",
     )
@@ -116,8 +124,11 @@ def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRun
         game_id=game_id,
         players=(player_a, player_b),
         snakes={player_a: snake_a, player_b: snake_b},
-        obstacles=set(STATIC_OBSTACLES),
-        pies=set(),
+        obstacles={
+            pos: {"kind": "wall", "damage": WALL_COLLISION_DAMAGE}
+            for pos in STATIC_OBSTACLES
+        },
+        pies={},
         lockstep_moves={player_a: False, player_b: False},
     )
     _spawn_next_pie(runtime)
@@ -185,50 +196,72 @@ def step_runtime(runtime: MatchRuntime) -> None:
     for snake in runtime.snakes.values():
         all_body_cells.update(snake.body)
 
-    # Apply movement + health + immediate collision checks.
-    ate_pie = False
+    # Collect all collision penalties first so lockstep outcomes are fair.
+    collision_penalties: dict[str, int] = {player: 0 for player in runtime.players}
     for player, snake in runtime.snakes.items():
         if not snake.alive:
             continue
 
         next_head = planned_heads[player]
-        snake.health -= HEALTH_DECAY_PER_TICK
-        if snake.health <= 0:
-            snake.health = 0
-            snake.alive = False
-            continue
-
         x, y = next_head
         if x < 0 or y < 0 or x >= runtime.width or y >= runtime.height:
-            snake.alive = False
-            continue
+            collision_penalties[player] += WALL_COLLISION_DAMAGE
         if next_head in runtime.obstacles:
-            snake.alive = False
-            continue
-        if next_head in all_body_cells:
-            snake.alive = False
+            obstacle_damage = int(runtime.obstacles[next_head].get("damage", WALL_COLLISION_DAMAGE))
+            collision_penalties[player] += obstacle_damage
+
+        # Explicitly handle "head collides with another snake" damage.
+        other_snake_cells: set[tuple[int, int]] = set()
+        own_body_cells: set[tuple[int, int]] = set()
+        for other_player, other_snake in runtime.snakes.items():
+            if other_player == player:
+                own_body_cells.update(other_snake.body)
+            else:
+                other_snake_cells.update(other_snake.body)
+
+        if next_head in other_snake_cells:
+            collision_penalties[player] += OTHER_SNAKE_COLLISION_DAMAGE
+        # Keep self-collision behavior for standard snake rules.
+        if next_head in own_body_cells:
+            collision_penalties[player] += SELF_COLLISION_DAMAGE
+
+    # Head-to-head: both snakes choose the same next cell this tick.
+    next_heads_to_players: dict[tuple[int, int], list[str]] = {}
+    for player, next_head in planned_heads.items():
+        next_heads_to_players.setdefault(next_head, []).append(player)
+    for players in next_heads_to_players.values():
+        if len(players) > 1:
+            for player in players:
+                collision_penalties[player] += HEAD_TO_HEAD_DAMAGE
+
+    # Apply penalties or movement.
+    ate_pie = False
+    for player, snake in runtime.snakes.items():
+        if not snake.alive:
             continue
 
-        grows = next_head in runtime.pies
+        penalty = collision_penalties.get(player, 0)
+        if penalty > 0:
+            snake.health = max(0, snake.health - penalty)
+            snake.alive = snake.health > 0
+            continue
+
+        next_head = planned_heads[player]
+        pie_info = runtime.pies.get(next_head)
+        grows = pie_info is not None
+
         snake.body.insert(0, next_head)
         if not grows:
             snake.body.pop()
         else:
             ate_pie = True
-            runtime.pies.discard(next_head)
-            snake.health = min(INITIAL_HEALTH, snake.health + HEALTH_GAIN_PER_PIE)
+            runtime.pies.pop(next_head, None)
+            gained = int(pie_info.get("health_delta", DEFAULT_PIE_HEALTH_GAIN))
+            snake.health += gained
 
-    # Head-to-head collision after simultaneous move.
-    alive_heads: dict[tuple[int, int], list[str]] = {}
-    for player, snake in runtime.snakes.items():
-        if snake.alive:
-            alive_heads.setdefault(snake.body[0], []).append(player)
-    for players in alive_heads.values():
-        if len(players) > 1:
-            for player in players:
-                runtime.snakes[player].alive = False
+        snake.alive = snake.health > 0
 
-    if ate_pie:
+    if ate_pie or not runtime.pies:
         _spawn_next_pie(runtime)
 
     _update_match_status(runtime)
@@ -255,18 +288,18 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
         make_pie_state(
             pie_id=f"pie-{runtime.pie_counter}",
             position=make_position(x, y),
-            points=1,
+            points=int(metadata.get("points", 1)),
         )
-        for x, y in sorted(runtime.pies)
+        for (x, y), metadata in sorted(runtime.pies.items())
     ]
 
     obstacles = [
         make_obstacle_state(
             obstacle_id=f"obstacle-{idx}",
             position=make_position(x, y),
-            kind="wall",
+            kind=str(metadata.get("kind", "wall")),
         )
-        for idx, (x, y) in enumerate(sorted(runtime.obstacles), start=1)
+        for idx, ((x, y), metadata) in enumerate(sorted(runtime.obstacles.items()), start=1)
     ]
 
     timer = make_timer_state(
@@ -290,14 +323,17 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
 def _spawn_next_pie(runtime: MatchRuntime) -> None:
     """Spawn one pie on the first free deterministic board cell."""
 
-    occupied = set(runtime.obstacles)
+    occupied = set(runtime.obstacles.keys())
     for snake in runtime.snakes.values():
         occupied.update(snake.body)
+    occupied.update(runtime.pies.keys())
+
+    pie_template = PIE_TYPES[(runtime.pie_counter - 1) % len(PIE_TYPES)]
 
     for y in range(runtime.height):
         for x in range(runtime.width):
             if (x, y) not in occupied:
-                runtime.pies = {(x, y)}
+                runtime.pies = {(x, y): dict(pie_template)}
                 runtime.pie_counter += 1
                 return
 
@@ -307,18 +343,11 @@ def _spawn_next_pie(runtime: MatchRuntime) -> None:
 def _update_match_status(runtime: MatchRuntime) -> None:
     """Evaluate end conditions and compute winner when match is over."""
 
-    alive_players = [p for p in runtime.players if runtime.snakes[p].alive]
-
-    if len(alive_players) == 1:
-        runtime.status = "finished"
-        runtime.winner = alive_players[0]
-        runtime.end_reason = "elimination"
-        return
-
-    if len(alive_players) == 0:
+    zero_health_players = [p for p in runtime.players if runtime.snakes[p].health <= 0]
+    if zero_health_players:
         runtime.status = "finished"
         runtime.winner = _winner_by_health(runtime)
-        runtime.end_reason = "mutual_elimination"
+        runtime.end_reason = "health_depleted"
         return
 
     if runtime.tick >= runtime.max_ticks:

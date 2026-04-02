@@ -18,7 +18,6 @@ from server.game_engine import (
     MatchRuntime,
     create_match_runtime,
     queue_direction,
-    should_step,
     step_runtime,
     to_protocol_state,
 )
@@ -257,8 +256,10 @@ class ServerState:
                 }
                 return False, reason_map.get(reason, "movement_rejected"), game_id, None, None
 
-            # Sprint 3 movement update logic: progress tick once both players submitted input.
-            if should_step(runtime):
+            # Progress simulation immediately on each accepted movement command.
+            # This keeps client rendering responsive even when players are not
+            # sending perfectly synchronized lockstep inputs.
+            if runtime.status == "running":
                 step_runtime(runtime)
 
             state_dict = to_protocol_state(runtime)

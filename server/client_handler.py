@@ -236,6 +236,15 @@ def _handle_movement_message(
         player=player,
         direction=direction,
     )
+
+    # Server-side movement trace for multi-match debugging.
+    # Includes game_id so concurrent matches are easy to differentiate.
+    trace_game_id = game_id or "unknown"
+    print(
+        f"[MOVE][game={trace_game_id}] player={player} direction={direction} "
+        f"result={'ok' if success else 'rejected'} reason={reason}"
+    )
+
     if not success:
         reason_to_message = {
             "invalid_direction": "Invalid movement direction.",
@@ -270,6 +279,10 @@ def _handle_movement_message(
 
     # PBI 3.10/3.11: send explicit end-of-game summary when match is finished.
     if game_over_payload is not None:
+        print(
+            f"[GAME_OVER][game={game_over_payload['game_id']}] "
+            f"winner={game_over_payload['winner']} reason={game_over_payload.get('reason')}"
+        )
         game_over_message = make_game_over_message(
             game_id=game_over_payload["game_id"],
             winner=game_over_payload["winner"],
