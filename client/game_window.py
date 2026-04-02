@@ -83,7 +83,13 @@ _OPPOSITE_DIRECTION: dict[str, str] = {
 class PygameArenaWindow:
     """Minimal Pygame window shell used for Sprint 4 gameplay UI work."""
 
-    def __init__(self, server_ip: str, server_port: int, username: str) -> None:
+    def __init__(
+        self,
+        server_ip: str,
+        server_port: int,
+        username: str,
+        preferred_opponent: str | None = None,
+    ) -> None:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -97,7 +103,9 @@ class PygameArenaWindow:
         self.incoming_queue: queue.Queue[dict] = queue.Queue()
         self.username_confirmed = False
         self.online_users: list[str] = []
+        self.preferred_opponent = preferred_opponent
         self.pending_invite_to: str | None = None
+        self.pending_invite_sent_ms = 0
         self.last_server_message = "Connecting..."
         self.last_input_direction = "-"
         self.last_sent_direction = "-"
@@ -127,6 +135,7 @@ class PygameArenaWindow:
         self.result_winner = "-"
         self.result_reason = "-"
         self.result_scores: dict[str, int] = {}
+        self.return_to_lobby_requested = False
         self.board_pixel_width = BOARD_COLS * CELL_SIZE
         self.board_pixel_height = BOARD_ROWS * CELL_SIZE
         self.board_origin_x = 100
@@ -169,6 +178,22 @@ class PygameArenaWindow:
 
         self._disconnect_from_server()
         pygame.quit()
+        if self.return_to_lobby_requested:
+            self._launch_lobby()
+
+    def _launch_lobby(self) -> None:
+        """Return player to Tkinter lobby with same connection settings."""
+
+        from client.gui import ArenaGuiApp
+
+        app = ArenaGuiApp()
+        app.server_ip_var.set(self.server_ip)
+        app.server_port_var.set(str(self.server_port))
+        app.username_var.set(self.username)
+        app._retry_same_username = True
+        # Give backend a short moment to release old socket/session cleanly.
+        app.root.after(450, app._connect)
+        app.run()
 
     def _handle_events(self) -> None:
         """Process window close and keyboard exit events."""
@@ -181,6 +206,9 @@ class PygameArenaWindow:
                     self.running = False
                 elif event.key == pygame.K_SPACE:
                     self.show_result_screen = False
+                elif event.key == pygame.K_r and self.show_result_screen:
+                    self.return_to_lobby_requested = True
+                    self.running = False
                 self._handle_direction_input(event.key)
 
     def _handle_direction_input(self, key: int) -> None:
@@ -325,6 +353,15 @@ class PygameArenaWindow:
             if "movement" in message_text or "match" in message_text or "active match" in message_text:
                 self.rejected_movement_commands += 1
             if (
+                "invitation" in message_text
+                or "busy" in message_text
+                or "offline" in message_text
+            ):
+                # Retry invite flow if server rejected previous attempt.
+                self.pending_invite_to = None
+                self.pending_invite_sent_ms = 0
+                self._maybe_send_auto_invite()
+            if (
                 "connection" in message_text
                 or "disconnect" in message_text
                 or "closed" in message_text
@@ -357,7 +394,20 @@ class PygameArenaWindow:
         if not opponents:
             return
 
-        opponent = opponents[0]
+        preferred = self.preferred_opponent
+        if preferred is not None:
+            matching = [user for user in opponents if user.casefold() == preferred.casefold()]
+            if matching:
+                opponent = matching[0]
+                # Avoid invitation race: only one deterministic side sends.
+                if self.username.casefold() > opponent.casefold():
+                    self.last_server_message = f"Waiting invite from {opponent}"
+                    return
+            else:
+                opponent = opponents[0]
+        else:
+            opponent = opponents[0]
+
         self.connection.send_message(
             make_invitation_message(
                 from_user=self.username,
@@ -366,6 +416,7 @@ class PygameArenaWindow:
             )
         )
         self.pending_invite_to = opponent
+        self.pending_invite_sent_ms = pygame.time.get_ticks()
         self.last_server_message = f"Invited {opponent}"
 
     def _sync_from_game_state(self, state: dict) -> None:
@@ -496,6 +547,15 @@ class PygameArenaWindow:
 
         now = pygame.time.get_ticks()
         if now - self.last_move_ms < MOVE_INTERVAL_MS:
+            if (
+                self.active_game_id is None
+                and self.pending_invite_to is not None
+                and now - self.pending_invite_sent_ms > 1500
+            ):
+                # Recover from stale invite state by trying again.
+                self.pending_invite_to = None
+                self.pending_invite_sent_ms = 0
+                self._maybe_send_auto_invite()
             return
 
         self.last_move_ms = now
@@ -900,14 +960,24 @@ class PygameArenaWindow:
                 self.screen.blit(line, (245, y))
                 y += 30
 
-        hint = self.font_hint.render("SPACE: hide result  |  ESC: exit", True, SUBTEXT_COLOR)
+        hint = self.font_hint.render("SPACE: hide result  |  R: lobby  |  ESC: exit", True, SUBTEXT_COLOR)
         self.screen.blit(hint, (420, 518))
 
 
-def main(server_ip: str = "127.0.0.1", server_port: int = 5000, username: str = "Player") -> None:
+def main(
+    server_ip: str = "127.0.0.1",
+    server_port: int = 5000,
+    username: str = "Player",
+    preferred_opponent: str | None = None,
+) -> None:
     """Entrypoint for launching the Sprint 4 Pygame client window."""
 
-    app = PygameArenaWindow(server_ip=server_ip, server_port=server_port, username=username)
+    app = PygameArenaWindow(
+        server_ip=server_ip,
+        server_port=server_port,
+        username=username,
+        preferred_opponent=preferred_opponent,
+    )
     app.run()
 
 

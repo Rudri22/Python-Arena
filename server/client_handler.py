@@ -206,6 +206,28 @@ def _handle_invitation_message(
                         continue
         return
 
+    if action == "handoff":
+        # GUI -> Pygame transition marker. Keep active match alive briefly
+        # while clients reconnect using the same usernames.
+        if sender_username.casefold() != from_user.casefold():
+            send_message(client_socket, make_error_message("Invitation sender mismatch."))
+            return
+
+        success, reason = server_state.mark_match_handoff(from_user)
+        if not success:
+            reason_to_error = {
+                "user_offline": "Handoff failed: user offline.",
+                "user_not_in_match": "Handoff failed: no active match.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Handoff failed.")))
+            return
+
+        send_message(
+            client_socket,
+            make_chat_message(sender="SERVER", message="Match handoff marked. Reconnect to continue."),
+        )
+        return
+
     send_message(client_socket, make_error_message("Unsupported invitation action."))
 
 

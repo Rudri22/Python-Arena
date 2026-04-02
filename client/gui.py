@@ -46,6 +46,10 @@ class ArenaGuiApp:
         self.online_users: list[str] = []
         self.username_confirmed = False
         self.incoming_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._switching_to_pygame = False
+        self._retry_same_username = False
+        self._username_retry_count = 0
+        self._username_retry_max = 8
 
         self._build_layout()
         self.root.after(100, self._drain_incoming_queue)
@@ -180,6 +184,7 @@ class ArenaGuiApp:
         self.running = True
         self.username = username
         self.username_confirmed = False
+        self._username_retry_count = 0
         self._set_connected_ui(True)
         self.waiting_var.set("Submitting username...")
         self._append_log(f"[SYSTEM] Connected to {server_ip}:{server_port}")
@@ -192,7 +197,7 @@ class ArenaGuiApp:
         # We push this action into queue to keep ordering deterministic.
         self.incoming_queue.put(("register_username", username))
 
-    def _disconnect(self) -> None:
+    def _disconnect(self, *, silent: bool = False) -> None:
         """Disconnect client and reset GUI to idle state."""
 
         self.running = False
@@ -208,7 +213,49 @@ class ArenaGuiApp:
         self._render_online_players()
         self.waiting_var.set("Not connected.")
         self._set_connected_ui(False)
-        self._append_log("[SYSTEM] Disconnected.")
+        if not silent:
+            self._append_log("[SYSTEM] Disconnected.")
+
+    def _switch_to_pygame(self, game_id: str, opponent: str | None = None) -> None:
+        """Close lobby GUI and launch the real Pygame match window."""
+
+        if self._switching_to_pygame:
+            return
+        self._switching_to_pygame = True
+
+        server_ip = self.server_ip_var.get().strip() or "127.0.0.1"
+        try:
+            server_port = int(self.server_port_var.get().strip())
+        except ValueError:
+            server_port = 5000
+
+        self._append_log(f"[MATCH] Switching to gameplay window (game_id={game_id})...")
+        if self.connection is not None and opponent is not None:
+            try:
+                # Tell backend this disconnect is intentional handoff.
+                self.connection.send_message(
+                    make_invitation_message(
+                        from_user=self.username,
+                        to_user=opponent,
+                        action="handoff",
+                        game_id=game_id,
+                    )
+                )
+            except OSError:
+                # If handoff marker fails, fallback to normal reconnect flow.
+                pass
+        self._disconnect(silent=True)
+        self.root.destroy()
+
+        # Import lazily so GUI startup does not require pygame until needed.
+        from client.game_window import main as pygame_main
+
+        pygame_main(
+            server_ip=server_ip,
+            server_port=server_port,
+            username=self.username,
+            preferred_opponent=opponent,
+        )
 
     def _receiver_loop(self) -> None:
         """Continuously receive messages from server in background thread."""
@@ -309,7 +356,12 @@ class ArenaGuiApp:
             if action == "match_started":
                 game_id = payload.get("game_id", "unknown")
                 self._append_log(f"[MATCH] Started for {from_user} vs {to_user} (game_id={game_id})")
-                messagebox.showinfo("Match Started", f"Game started! ID: {game_id}")
+                # Auto-switch matched players from lobby GUI to the gameplay window.
+                if self.username.casefold() in {str(from_user).casefold(), str(to_user).casefold()}:
+                    opponent = str(to_user) if str(from_user).casefold() == self.username.casefold() else str(from_user)
+                    self._switch_to_pygame(str(game_id), opponent=opponent)
+                else:
+                    messagebox.showinfo("Match Started", f"Game started! ID: {game_id}")
                 return
 
             # Fallback for any unknown invitation action.
@@ -328,6 +380,19 @@ class ArenaGuiApp:
             # If username is rejected as taken, force user to enter another.
             # Keep connection alive and retry registration immediately.
             if "Username already taken" in payload.get("message", ""):
+                if self._retry_same_username:
+                    self._username_retry_count += 1
+                    if self._username_retry_count <= self._username_retry_max:
+                        self._append_log(
+                            f"[SYSTEM] Username still releasing, retry {self._username_retry_count}/{self._username_retry_max}..."
+                        )
+                    elif self._username_retry_count % 5 == 0:
+                        self._append_log(
+                            f"[SYSTEM] Waiting to reclaim username '{self.username}'... retry {self._username_retry_count}"
+                        )
+                    self.root.after(500, lambda: self.incoming_queue.put(("register_username", self.username)))
+                    return
+
                 new_username = simpledialog.askstring(
                     "Username Taken",
                     "This username is already in use.\nPlease enter a different username:",
