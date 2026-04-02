@@ -8,7 +8,7 @@ This Tkinter app covers:
 - waiting state when no opponents are available
 - opponent selection and invitation send
 - incoming invitation notice
-- basic chat send/receive
+- public and private chat send/receive
 """
 
 from __future__ import annotations
@@ -50,6 +50,8 @@ class ArenaGuiApp:
         self._retry_same_username = False
         self._username_retry_count = 0
         self._username_retry_max = 8
+        self._chat_enabled_by_connection = False
+        self.chat_tabs: dict[str, tk.Text] = {}
 
         self._build_layout()
         self.root.after(100, self._drain_incoming_queue)
@@ -118,6 +120,7 @@ class ArenaGuiApp:
         right = ttk.Frame(self.root, padding=(0, 0, 10, 10))
         right.grid(row=1, column=1, sticky="nsew")
         right.rowconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
 
         log_frame = ttk.LabelFrame(right, text="Lobby Events", padding=8)
@@ -128,8 +131,19 @@ class ArenaGuiApp:
         self.log_text = tk.Text(log_frame, height=18, wrap="word", state="disabled")
         self.log_text.grid(row=0, column=0, sticky="nsew")
 
+        chat_tabs_frame = ttk.LabelFrame(right, text="Chat", padding=8)
+        chat_tabs_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        chat_tabs_frame.rowconfigure(0, weight=1)
+        chat_tabs_frame.columnconfigure(0, weight=1)
+
+        self.chat_notebook = ttk.Notebook(chat_tabs_frame)
+        self.chat_notebook.grid(row=0, column=0, sticky="nsew")
+        self.chat_notebook.bind("<<NotebookTabChanged>>", lambda _event: self._sync_mode_from_selected_tab())
+        self._ensure_chat_tab("Public")
+        self._select_chat_tab("Public")
+
         chat_bar = ttk.Frame(right, padding=(0, 10, 0, 0))
-        chat_bar.grid(row=1, column=0, sticky="ew")
+        chat_bar.grid(row=2, column=0, sticky="ew")
         chat_bar.columnconfigure(0, weight=1)
 
         self.chat_var = tk.StringVar()
@@ -137,8 +151,30 @@ class ArenaGuiApp:
         self.chat_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.chat_entry.bind("<Return>", lambda _event: self._send_chat())
 
+        self.chat_mode_var = tk.StringVar(value="Public")
+        self.chat_mode_combo = ttk.Combobox(
+            chat_bar,
+            textvariable=self.chat_mode_var,
+            values=["Public", "Private"],
+            state="readonly",
+            width=10,
+        )
+        self.chat_mode_combo.grid(row=0, column=1, padx=(0, 8))
+        self.chat_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._update_chat_target_state())
+
+        self.chat_target_var = tk.StringVar(value="None")
+        self.chat_target_combo = ttk.Combobox(
+            chat_bar,
+            textvariable=self.chat_target_var,
+            state="disabled",
+            width=16,
+        )
+        self.chat_target_combo.grid(row=0, column=2, padx=(0, 8))
+        self.chat_target_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_chat_target_changed())
+        self.chat_target_combo.bind("<KeyRelease>", lambda _event: self._on_chat_target_changed())
+
         self.send_button = ttk.Button(chat_bar, text="Send Chat", command=self._send_chat, state="disabled")
-        self.send_button.grid(row=0, column=1)
+        self.send_button.grid(row=0, column=3)
 
     def _append_log(self, text: str) -> None:
         """Append one line to the event log area."""
@@ -148,15 +184,68 @@ class ArenaGuiApp:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    def _append_chat(self, tab_name: str, text: str) -> None:
+        """Append one line to a chat tab, creating the tab if needed."""
+
+        chat_text = self._ensure_chat_tab(tab_name)
+        chat_text.configure(state="normal")
+        chat_text.insert("end", f"{text}\n")
+        chat_text.see("end")
+        chat_text.configure(state="disabled")
+
+    def _ensure_chat_tab(self, tab_name: str) -> tk.Text:
+        """Create a chat tab on demand and return its text widget."""
+
+        if tab_name in self.chat_tabs:
+            return self.chat_tabs[tab_name]
+
+        tab = ttk.Frame(self.chat_notebook)
+        tab.rowconfigure(0, weight=1)
+        tab.columnconfigure(0, weight=1)
+        text_widget = tk.Text(tab, height=8, wrap="word", state="disabled")
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        self.chat_notebook.add(tab, text=tab_name)
+        self.chat_tabs[tab_name] = text_widget
+        return text_widget
+
+    def _select_chat_tab(self, tab_name: str) -> None:
+        """Select a tab if it exists."""
+
+        for tab_id in self.chat_notebook.tabs():
+            if self.chat_notebook.tab(tab_id, "text") == tab_name:
+                self.chat_notebook.select(tab_id)
+                return
+
+    def _selected_chat_tab_name(self) -> str:
+        """Return current chat tab label."""
+
+        current = self.chat_notebook.select()
+        if not current:
+            return "Public"
+        return str(self.chat_notebook.tab(current, "text"))
+
+    def _sync_mode_from_selected_tab(self) -> None:
+        """Keep mode/target selectors aligned with selected chat tab."""
+
+        tab_name = self._selected_chat_tab_name()
+        if tab_name == "Public":
+            self.chat_mode_var.set("Public")
+            self.chat_target_var.set("None")
+        else:
+            self.chat_mode_var.set("Private")
+            self.chat_target_var.set(tab_name)
+        self._update_chat_target_state()
+
     def _set_connected_ui(self, connected: bool) -> None:
         """Enable/disable controls based on connection state."""
 
+        self._chat_enabled_by_connection = connected
         self.connect_button.configure(state="disabled" if connected else "normal")
         self.disconnect_button.configure(state="normal" if connected else "disabled")
-        # Chat/invite become enabled only after username is accepted.
-        self.send_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
+        # Invite becomes enabled only after username is accepted.
         self.invite_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
         self.refresh_button.configure(state="normal" if connected else "disabled")
+        self._update_send_chat_state()
 
     def _connect(self) -> None:
         """Validate input, connect to server, and start receive loop."""
@@ -211,6 +300,10 @@ class ArenaGuiApp:
         self.online_users = []
         self.username_confirmed = False
         self._render_online_players()
+        self.chat_mode_var.set("Public")
+        self.chat_target_var.set("None")
+        self._select_chat_tab("Public")
+        self._update_chat_target_state()
         self.waiting_var.set("Not connected.")
         self._set_connected_ui(False)
         if not silent:
@@ -371,7 +464,16 @@ class ArenaGuiApp:
         if msg_type == MessageType.CHAT.value:
             sender = payload.get("sender", "SERVER")
             text = payload.get("message", "")
-            self._append_log(f"[CHAT] {sender}: {text}")
+            recipient = payload.get("recipient")
+            if recipient:
+                if str(sender).casefold() == self.username.casefold():
+                    private_tab = str(recipient)
+                    self._append_chat(private_tab, f"{sender}: {text}")
+                else:
+                    private_tab = str(sender)
+                    self._append_chat(private_tab, f"{sender}: {text}")
+            else:
+                self._append_chat("Public", f"{sender}: {text}")
             return
 
         if msg_type == MessageType.ERROR.value:
@@ -424,6 +526,75 @@ class ArenaGuiApp:
         for user in self.online_users:
             label = f"{user} (You)" if user == self.username else user
             self.players_listbox.insert("end", label)
+        self._refresh_chat_targets()
+
+    def _refresh_chat_targets(self) -> None:
+        """Refresh private chat target choices from current online users."""
+
+        candidates = [user for user in self.online_users if user != self.username]
+        previous = self.chat_target_var.get().strip()
+        self.chat_target_combo["values"] = ["None", *candidates]
+
+        if previous in candidates:
+            self.chat_target_var.set(previous)
+        else:
+            self.chat_target_var.set("None")
+
+        self._update_chat_target_state()
+
+    def _update_chat_target_state(self) -> None:
+        """Enable private target picker only when private mode is selected."""
+
+        is_private = self.chat_mode_var.get().strip().lower() == "private"
+        self.chat_target_combo.configure(state="normal" if is_private else "disabled")
+        if is_private and not self.chat_target_var.get().strip():
+            self.chat_target_var.set("None")
+        if is_private:
+            target = self._private_chat_target()
+            if target is not None:
+                self._ensure_chat_tab(target)
+                self._select_chat_tab(target)
+        else:
+            self._select_chat_tab("Public")
+        self._update_send_chat_state()
+
+    def _on_chat_target_changed(self) -> None:
+        """Handle private target edits and switch chat tab when valid."""
+
+        if self.chat_mode_var.get().strip().lower() != "private":
+            self._update_send_chat_state()
+            return
+
+        target = self._private_chat_target()
+        if target is not None:
+            self._ensure_chat_tab(target)
+            self._select_chat_tab(target)
+        self._update_send_chat_state()
+
+    def _private_chat_target(self) -> str | None:
+        """Return selected/typed private target when it matches an online opponent."""
+
+        raw_target = self.chat_target_var.get().strip()
+        if not raw_target or raw_target.lower() == "none":
+            return None
+
+        for user in self.online_users:
+            if user == self.username:
+                continue
+            if user.casefold() == raw_target.casefold():
+                return user
+        return None
+
+    def _update_send_chat_state(self) -> None:
+        """Lock chat send when private mode has no valid selected/typed target."""
+
+        can_chat = self._chat_enabled_by_connection and self.username_confirmed
+        is_private = self.chat_mode_var.get().strip().lower() == "private"
+        if is_private and self._private_chat_target() is None:
+            can_chat = False
+
+        self.send_button.configure(state="normal" if can_chat else "disabled")
+        self.chat_entry.configure(state="normal" if can_chat else "disabled")
 
     def _selected_opponent(self) -> str | None:
         """Return selected opponent username from listbox, excluding self."""
@@ -468,7 +639,22 @@ class ArenaGuiApp:
         if not text:
             return
 
-        self.connection.send_message(make_chat_message(sender=self.username, message=text))
+        recipient: str | None = None
+        selected_tab = self._selected_chat_tab_name()
+        if selected_tab != "Public":
+            recipient = selected_tab
+            self.chat_mode_var.set("Private")
+            self.chat_target_var.set(selected_tab)
+        elif self.chat_mode_var.get().strip().lower() == "private":
+            target = self._private_chat_target()
+            if target is None:
+                messagebox.showwarning("Private Chat", "Choose or type a valid private recipient first.")
+                return
+            recipient = target
+            self._ensure_chat_tab(target)
+            self._select_chat_tab(target)
+
+        self.connection.send_message(make_chat_message(sender=self.username, message=text, recipient=recipient))
         self.chat_var.set("")
 
     def _on_close(self) -> None:

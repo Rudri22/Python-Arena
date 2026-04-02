@@ -117,8 +117,8 @@ def _run_game_loop(server_state: ServerState) -> None:
     Sprint 5 PBI 5.1 + 5.6 continuous match loop.
 
     The loop advances active matches on a fixed tick and broadcasts:
-    - GAME_STATE updates to active players
-    - GAME_OVER when a match finishes
+    - GAME_STATE updates to active players and spectators
+    - GAME_OVER when a match finishes (players + spectators)
     """
 
     while True:
@@ -127,13 +127,14 @@ def _run_game_loop(server_state: ServerState) -> None:
             game_id = str(update["game_id"])
             state = dict(update["state"])
             game_state_message = make_game_state_message(game_id=game_id, state=state)
-            # Sprint 5 reliability note:
-            # Use the players captured in this tick update so final broadcasts
+            # Sprint 5/6 reliability note:
+            # Use recipients captured in this tick update so final broadcasts
             # still work even after session cleanup removed match mapping.
-            players = tuple(update.get("players", ()))
+            # Recipients include active players and spectators.
+            recipients = tuple(update.get("recipients", update.get("players", ())))
             sockets: list[socket.socket] = []
-            for player in players:
-                sock = server_state.get_socket_for_username(str(player))
+            for username in recipients:
+                sock = server_state.get_socket_for_username(str(username))
                 if sock is not None:
                     sockets.append(sock)
             for sock in sockets:
