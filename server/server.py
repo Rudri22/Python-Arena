@@ -11,15 +11,19 @@ from __future__ import annotations
 import argparse
 import socket
 import threading
+import time
 from contextlib import closing
 
 from server.client_handler import handle_client_connection
 from server.state import ServerState
+from shared.protocol import make_game_over_message, make_game_state_message
+from shared.utils import encode_message_for_socket
 
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 5000
 BACKLOG = 20
+GAME_TICK_SECONDS = 0.12
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,6 +77,14 @@ def run_server(host: str, port: int) -> None:
     # Shared state object passed to each client thread.
     server_state = ServerState()
 
+    # Sprint 5 PBI 5.1: continuous authoritative game loop thread.
+    game_loop_thread = threading.Thread(
+        target=_run_game_loop,
+        args=(server_state,),
+        daemon=True,
+    )
+    game_loop_thread.start()
+
     with closing(create_server_socket(host, port)) as server_socket:
         print(f"[SERVER] Listening on {host}:{port}")
 
@@ -92,6 +104,59 @@ def run_server(host: str, port: int) -> None:
         except KeyboardInterrupt:
             # Graceful shutdown path when you stop the process with Ctrl+C.
             print("\n[SERVER] Shutdown requested. Stopping server...")
+
+
+def _send_socket_message(sock: socket.socket, message: dict) -> None:
+    """Server-level helper for sending protocol messages safely."""
+
+    sock.sendall(encode_message_for_socket(message))
+
+
+def _run_game_loop(server_state: ServerState) -> None:
+    """
+    Sprint 5 PBI 5.1 + 5.6 continuous match loop.
+
+    The loop advances active matches on a fixed tick and broadcasts:
+    - GAME_STATE updates to active players
+    - GAME_OVER when a match finishes
+    """
+
+    while True:
+        updates = server_state.step_active_matches()
+        for update in updates:
+            game_id = str(update["game_id"])
+            state = dict(update["state"])
+            game_state_message = make_game_state_message(game_id=game_id, state=state)
+            # Sprint 5 reliability note:
+            # Use the players captured in this tick update so final broadcasts
+            # still work even after session cleanup removed match mapping.
+            players = tuple(update.get("players", ()))
+            sockets: list[socket.socket] = []
+            for player in players:
+                sock = server_state.get_socket_for_username(str(player))
+                if sock is not None:
+                    sockets.append(sock)
+            for sock in sockets:
+                try:
+                    _send_socket_message(sock, game_state_message)
+                except OSError:
+                    continue
+
+            game_over_payload = update.get("game_over")
+            if game_over_payload is not None:
+                game_over_message = make_game_over_message(
+                    game_id=game_id,
+                    winner=str(game_over_payload.get("winner", "draw")),
+                    final_scores=game_over_payload.get("final_scores"),
+                    reason=str(game_over_payload.get("reason", "match_finished")),
+                )
+                for sock in sockets:
+                    try:
+                        _send_socket_message(sock, game_over_message)
+                    except OSError:
+                        continue
+
+        time.sleep(GAME_TICK_SECONDS)
 
 
 def main() -> None:

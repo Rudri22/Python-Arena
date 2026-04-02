@@ -43,6 +43,9 @@ def broadcast_online_users(server_state: ServerState) -> None:
     waiting = len(users) < 2
     message = make_online_users_message(users)
     message["payload"]["waiting"] = waiting
+    # Sprint 5 PBI 5.3: expose lobby-vs-active split for UI clarity.
+    message["payload"]["idle_users"] = server_state.get_idle_users()
+    message["payload"]["active_players"] = len(users) - len(message["payload"]["idle_users"])
 
     for sock in server_state.get_client_sockets():
         try:
@@ -430,8 +433,37 @@ def handle_client_connection(
                     )
                 except ProtocolError as error:
                     send_message(client_socket, make_error_message("Invalid message payload.", str(error)))
+                except Exception as error:
+                    # Sprint 5 PBI 5.7: never let one malformed action crash the handler loop.
+                    send_message(client_socket, make_error_message("Server action failed.", str(error)))
 
-    server_state.unregister_client(client_id)
+    disconnect_events = server_state.unregister_client_with_events(client_id)
+
+    # Sprint 5 PBI 5.5: notify remaining player when match ends by disconnect.
+    for event in disconnect_events:
+        if event.get("type") != "match_abandoned":
+            continue
+        players = event.get("players", ())
+        winner = str(event.get("winner", "draw"))
+        disconnected_player = str(event.get("disconnected_player", "unknown"))
+        game_id = str(event.get("game_id", "unknown"))
+        final_scores = {str(players[0]): 0, str(players[1]): 0} if len(players) == 2 else None
+        game_over_message = make_game_over_message(
+            game_id=game_id,
+            winner=winner,
+            final_scores=final_scores,
+            reason=f"disconnect:{disconnected_player}",
+        )
+        for player in players:
+            if player == disconnected_player:
+                continue
+            sock = server_state.get_socket_for_username(player)
+            if sock is None:
+                continue
+            try:
+                send_message(sock, game_over_message)
+            except OSError:
+                continue
 
     # PBI 2.4: ensure lobby update goes out when a user disconnects.
     broadcast_online_users(server_state)
