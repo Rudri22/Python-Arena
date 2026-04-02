@@ -48,6 +48,7 @@ PIE_HEALTH_GAIN = 10
 OBSTACLE_COLLISION_DAMAGE = 12
 SNAKE_COLLISION_DAMAGE = 16
 TARGET_PIE_COUNT = 4
+LOCAL_INITIAL_HEALTH = 1000
 BG_COLOR = (16, 20, 28)
 PANEL_COLOR = (28, 35, 48)
 TEXT_COLOR = (235, 241, 248)
@@ -145,8 +146,8 @@ class PygameArenaWindow:
         self.render_snake_b = [(float(x), float(y)) for x, y in self.snake_b]
         self.snake_a_direction = "right"
         self.snake_b_direction = "left"
-        self.snake_a_health = 100
-        self.snake_b_health = 100
+        self.snake_a_health = LOCAL_INITIAL_HEALTH
+        self.snake_b_health = LOCAL_INITIAL_HEALTH
         # PBI 4.4 baseline pie rendering.
         self.pies: list[tuple[int, int]] = [(7, 5), (12, 14)]
         # PBI 4.5 baseline obstacle rendering.

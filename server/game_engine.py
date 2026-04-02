@@ -30,7 +30,8 @@ from shared.protocol import (
 BOARD_WIDTH = 20
 BOARD_HEIGHT = 20
 INITIAL_SNAKE_LENGTH = 3
-INITIAL_HEALTH = 100
+# Temporary tuning for local testing: keep players alive much longer.
+INITIAL_HEALTH = 1000
 DEFAULT_PIE_HEALTH_GAIN = 15
 WALL_COLLISION_DAMAGE = 20
 OTHER_SNAKE_COLLISION_DAMAGE = 20
@@ -302,10 +303,17 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
         for idx, ((x, y), metadata) in enumerate(sorted(runtime.obstacles.items()), start=1)
     ]
 
+    # Sprint 5 timing UX:
+    # Expose elapsed time starting from 1 as soon as a match is running so
+    # clients do not appear "stuck at 0" right after match start.
+    elapsed_for_payload = runtime.tick
+    if runtime.status == "running":
+        elapsed_for_payload = max(1, runtime.tick)
+
     timer = make_timer_state(
         total_seconds=runtime.max_ticks,
-        remaining_seconds=max(0, runtime.max_ticks - runtime.tick),
-        elapsed_seconds=runtime.tick,
+        remaining_seconds=max(0, runtime.max_ticks - elapsed_for_payload),
+        elapsed_seconds=elapsed_for_payload,
     )
 
     state: GameState = make_game_state(
@@ -317,7 +325,11 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
         winner=runtime.winner,
         status=runtime.status,
     )
-    return state_to_dict(state)
+    state_dict = state_to_dict(state)
+    # Sprint 5 compatibility helper:
+    # Provide numeric state for clients that expect 1=running, 0=not-running.
+    state_dict["status_code"] = 1 if runtime.status == "running" else 0
+    return state_dict
 
 
 def _spawn_next_pie(runtime: MatchRuntime) -> None:
