@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Launch Tkinter GUI client instead of terminal mode.",
     )
+    parser.add_argument(
+        "--pygame",
+        action="store_true",
+        help="Launch Sprint 4 Pygame gameplay window.",
+    )
 
     return parser.parse_args()
 
@@ -213,6 +218,33 @@ def main() -> None:
     """CLI entry point function for the client app."""
 
     args = parse_args()
+
+    if args.gui and args.pygame:
+        show_system("Choose only one UI mode: --gui or --pygame.")
+        raise SystemExit(1)
+
+    if args.pygame:
+        # Import lazily so terminal mode does not require pygame at import-time.
+        from client.game_window import main as pygame_main
+
+        pygame_username = args.username or DEFAULT_USERNAME
+        is_valid, result_message = validate_username(pygame_username)
+        show_username_validation_result(is_valid, result_message)
+        if not is_valid:
+            raise SystemExit(1)
+
+        try:
+            validate_server_address(args.server_ip, args.server_port)
+        except ValueError as error:
+            show_system(f"Invalid client arguments: {error}")
+            raise SystemExit(1) from error
+
+        pygame_main(
+            server_ip=args.server_ip,
+            server_port=args.server_port,
+            username=pygame_username,
+        )
+        return
 
     if args.gui:
         # Import lazily so terminal mode does not require GUI modules at import-time.
