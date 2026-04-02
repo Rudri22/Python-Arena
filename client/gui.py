@@ -101,12 +101,22 @@ class ArenaGuiApp:
         actions.grid(row=2, column=0, sticky="ew")
         actions.columnconfigure(0, weight=1)
         actions.columnconfigure(1, weight=1)
+        actions.columnconfigure(2, weight=1)
 
         self.refresh_button = ttk.Button(actions, text="Refresh View", command=self._render_online_players, state="disabled")
         self.refresh_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
         self.invite_button = ttk.Button(actions, text="Invite Selected", command=self._invite_selected_player, state="disabled")
         self.invite_button.grid(row=0, column=1, sticky="ew")
+
+        # Sprint 6 PBI 6.8: one-click spectator mode entry from lobby GUI.
+        self.spectate_button = ttk.Button(
+            actions,
+            text="Watch Spectator",
+            command=self._switch_to_spectator,
+            state="disabled",
+        )
+        self.spectate_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
         # Waiting state card.
         self.waiting_var = tk.StringVar(value="Not connected.")
@@ -157,6 +167,7 @@ class ArenaGuiApp:
         self.send_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
         self.invite_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
         self.refresh_button.configure(state="normal" if connected else "disabled")
+        self.spectate_button.configure(state="normal" if connected and self.username_confirmed else "disabled")
 
     def _connect(self) -> None:
         """Validate input, connect to server, and start receive loop."""
@@ -255,6 +266,32 @@ class ArenaGuiApp:
             server_port=server_port,
             username=self.username,
             preferred_opponent=opponent,
+        )
+
+    def _switch_to_spectator(self) -> None:
+        """Launch the Pygame viewer in spectator mode from lobby GUI."""
+
+        if self._switching_to_pygame:
+            return
+        self._switching_to_pygame = True
+
+        server_ip = self.server_ip_var.get().strip() or "127.0.0.1"
+        try:
+            server_port = int(self.server_port_var.get().strip())
+        except ValueError:
+            server_port = 5000
+
+        self._append_log("[SPECTATOR] Switching to Pygame spectator window...")
+        self._disconnect(silent=True)
+        self.root.destroy()
+
+        from client.game_window import main as pygame_main
+
+        pygame_main(
+            server_ip=server_ip,
+            server_port=server_port,
+            username=self.username,
+            spectator_mode=True,
         )
 
     def _receiver_loop(self) -> None:

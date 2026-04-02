@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import deque
 
 import pygame
 
 from client.network import ClientConnection
 from shared.protocol import (
     MessageType,
+    make_chat_message,
     make_invitation_message,
     make_movement_message,
     make_username_message,
@@ -89,6 +91,7 @@ class PygameArenaWindow:
         server_port: int,
         username: str,
         preferred_opponent: str | None = None,
+        spectator_mode: bool = False,
     ) -> None:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
@@ -98,6 +101,8 @@ class PygameArenaWindow:
         self.server_ip = server_ip
         self.server_port = server_port
         self.username = username
+        # Sprint 6 PBI 6.8: spectator mode client-side runtime flag.
+        self.spectator_mode = spectator_mode
         self.connection: ClientConnection | None = None
         self.receiver_thread: threading.Thread | None = None
         self.incoming_queue: queue.Queue[dict] = queue.Queue()
@@ -136,6 +141,12 @@ class PygameArenaWindow:
         self.result_reason = "-"
         self.result_scores: dict[str, int] = {}
         self.return_to_lobby_requested = False
+        # Sprint 6 PBI 6.6 + 6.7: in-game chat runtime state.
+        self.chat_messages: deque[str] = deque(maxlen=8)
+        self.chat_input = ""
+        self.chat_typing = False
+        # Sprint 6 PBI 6.10: small creative "cheer" visual pulse.
+        self.cheer_pulse_until_ms = 0
         self.board_pixel_width = BOARD_COLS * CELL_SIZE
         self.board_pixel_height = BOARD_ROWS * CELL_SIZE
         self.board_origin_x = 100
@@ -202,6 +213,8 @@ class PygameArenaWindow:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
+                if self._handle_chat_input_event(event):
+                    continue
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
                 elif event.key == pygame.K_SPACE:
@@ -209,7 +222,69 @@ class PygameArenaWindow:
                 elif event.key == pygame.K_r and self.show_result_screen:
                     self.return_to_lobby_requested = True
                     self.running = False
+                elif event.key == pygame.K_c:
+                    self._send_cheer()
+                elif event.key == pygame.K_t:
+                    self.chat_typing = True
                 self._handle_direction_input(event.key)
+
+    def _handle_chat_input_event(self, event: pygame.event.Event) -> bool:
+        """Sprint 6 PBI 6.6: handle in-game chat compose input."""
+
+        if event.key == pygame.K_RETURN:
+            if self.chat_typing:
+                self._submit_chat_message()
+            else:
+                self.chat_typing = True
+            return True
+
+        if event.key == pygame.K_ESCAPE and self.chat_typing:
+            self.chat_typing = False
+            self.chat_input = ""
+            return True
+
+        if not self.chat_typing:
+            return False
+
+        if event.key == pygame.K_BACKSPACE:
+            self.chat_input = self.chat_input[:-1]
+            return True
+
+        # Keep typing payload simple and printable for lobby/game chat.
+        if event.unicode and event.unicode.isprintable():
+            self.chat_input += event.unicode
+            if len(self.chat_input) > 120:
+                self.chat_input = self.chat_input[:120]
+            return True
+
+        return False
+
+    def _submit_chat_message(self) -> None:
+        """Send chat message to server and append local echo."""
+
+        text = self.chat_input.strip()
+        self.chat_typing = False
+        self.chat_input = ""
+        if not text:
+            return
+        if self.connection is None:
+            return
+        try:
+            self.connection.send_message(make_chat_message(sender=self.username, message=text))
+            self.chat_messages.append(f"You: {text}")
+        except OSError:
+            self.chat_messages.append("[CHAT] Failed to send message.")
+
+    def _send_cheer(self) -> None:
+        """Sprint 6 PBI 6.10: trigger a lightweight cheer interaction."""
+
+        self.cheer_pulse_until_ms = pygame.time.get_ticks() + 650
+        if self.connection is None:
+            return
+        try:
+            self.connection.send_message(make_chat_message(sender=self.username, message="CHEER!"))
+        except OSError:
+            self.chat_messages.append("[CHAT] Cheer send failed.")
 
     def _handle_direction_input(self, key: int) -> None:
         """Handle local player movement direction input."""
@@ -296,7 +371,8 @@ class PygameArenaWindow:
             self.online_users = list(users)
             self.username_confirmed = any(user.casefold() == self.username.casefold() for user in users)
             self.last_server_message = f"Online users: {len(users)}"
-            self._maybe_send_auto_invite()
+            if not self.spectator_mode:
+                self._maybe_send_auto_invite()
             return
 
         if msg_type == MessageType.INVITATION.value:
@@ -304,6 +380,19 @@ class PygameArenaWindow:
             from_user = str(payload.get("from_user", ""))
             to_user = str(payload.get("to_user", ""))
             if action == "send" and to_user.casefold() == self.username.casefold():
+                # Spectators never join active matches.
+                if self.spectator_mode:
+                    if self.connection is not None:
+                        self.connection.send_message(
+                            make_invitation_message(
+                                from_user=from_user,
+                                to_user=self.username,
+                                action="decline",
+                            )
+                        )
+                    self.last_server_message = f"Declined invite (spectator mode) from {from_user}"
+                    return
+
                 # Auto-accept incoming invites so movement commands can enter live matches quickly.
                 if self.connection is not None:
                     self.connection.send_message(
@@ -336,6 +425,13 @@ class PygameArenaWindow:
             self.last_game_state_ms = pygame.time.get_ticks()
             self.accepted_game_states += 1
             self.last_server_message = "Game state updated"
+            return
+
+        if msg_type == MessageType.CHAT.value:
+            # Sprint 6 PBI 6.7: display incoming chat stream in gameplay view.
+            sender = str(payload.get("sender", "SERVER"))
+            text = str(payload.get("message", ""))
+            self.chat_messages.append(f"{sender}: {text}")
             return
 
         if msg_type == MessageType.GAME_OVER.value:
@@ -544,6 +640,8 @@ class PygameArenaWindow:
 
         if self.show_result_screen or not self.connection_healthy:
             return
+        if self.spectator_mode:
+            return
 
         now = pygame.time.get_ticks()
         if now - self.last_move_ms < MOVE_INTERVAL_MS:
@@ -675,7 +773,9 @@ class PygameArenaWindow:
     def _adjust_snake_length(self, snake_cells: list[tuple[int, int]], health: int) -> None:
         """Grow snake as health exceeds 100 while keeping a minimum base length."""
 
-        growth_segments = max(0, (health - 100) // HEALTH_PER_GROWTH_SEGMENT)
+        # Keep initial body length stable at match start even with high initial
+        # health; growth begins only after gaining health above starting value.
+        growth_segments = max(0, (health - LOCAL_INITIAL_HEALTH) // HEALTH_PER_GROWTH_SEGMENT)
         target_length = BASE_SNAKE_LENGTH + growth_segments
         if len(snake_cells) > target_length:
             del snake_cells[target_length:]
@@ -772,9 +872,47 @@ class PygameArenaWindow:
         self._draw_pies()
         self._draw_snakes()
         self._draw_health_scores()
+        self._draw_chat_panel()
+        self._draw_mode_banner()
         self._draw_connection_notice()
         if self.show_result_screen:
             self._draw_result_screen()
+
+    def _draw_mode_banner(self) -> None:
+        """Sprint 6 PBI 6.8: show explicit mode state in gameplay header."""
+
+        if self.spectator_mode:
+            label = "SPECTATOR MODE - watching live board"
+        else:
+            label = "PLAYER MODE - WASD/Arrows to move"
+        text = self.font_hint.render(label, True, ACCENT_COLOR)
+        self.screen.blit(text, (640, 88))
+
+        # Sprint 6 PBI 6.10: cheer pulse visual accent.
+        if pygame.time.get_ticks() < self.cheer_pulse_until_ms:
+            pulse = pygame.Surface((self.board_pixel_width, self.board_pixel_height), pygame.SRCALPHA)
+            pulse.fill((88, 196, 255, 28))
+            self.screen.blit(pulse, (self.board_origin_x, self.board_origin_y))
+
+    def _draw_chat_panel(self) -> None:
+        """Sprint 6 PBI 6.6 + 6.7: render in-match chat panel and compose line."""
+
+        chat_panel = pygame.Rect(70, 620, 760, 90)
+        pygame.draw.rect(self.screen, BOARD_BG_COLOR, chat_panel, border_radius=10)
+        pygame.draw.rect(self.screen, ACCENT_COLOR, chat_panel, width=2, border_radius=10)
+
+        title = self.font_hint.render("Chat (Enter to send, T to type, C to cheer)", True, SUBTEXT_COLOR)
+        self.screen.blit(title, (84, 628))
+
+        y = 648
+        for line in list(self.chat_messages)[-2:]:
+            rendered = self.font_hint.render(line[:95], True, TEXT_COLOR)
+            self.screen.blit(rendered, (84, y))
+            y += 20
+
+        compose_prefix = ">" if self.chat_typing else "(press T/Enter) >"
+        compose = self.font_hint.render(f"{compose_prefix} {self.chat_input}", True, ACCENT_COLOR)
+        self.screen.blit(compose, (450, 668))
 
     def _draw_connection_notice(self) -> None:
         """Draw non-intrusive but clear disconnect/error notice."""
@@ -969,6 +1107,7 @@ def main(
     server_port: int = 5000,
     username: str = "Player",
     preferred_opponent: str | None = None,
+    spectator_mode: bool = False,
 ) -> None:
     """Entrypoint for launching the Sprint 4 Pygame client window."""
 
@@ -977,6 +1116,7 @@ def main(
         server_port=server_port,
         username=username,
         preferred_opponent=preferred_opponent,
+        spectator_mode=spectator_mode,
     )
     app.run()
 
