@@ -278,6 +278,65 @@ class ServerState:
 
             return True, "updated", game_id, state_dict, game_over_payload
 
+    def validate_movement_command(self, player: str, direction: str) -> tuple[bool, str, str | None]:
+        """
+        Sprint 4 PBI 4.11: validate movement command before simulation update.
+
+        This method performs fast guard checks without mutating runtime:
+        - player must be in an active match
+        - match runtime must exist
+        - match must still be running
+        - player snake must be alive
+        - direction must be one of allowed protocol values
+        """
+
+        with self._lock:
+            game_id = self._user_to_match.get(player)
+            if game_id is None:
+                return False, "player_not_in_match", None
+
+            runtime = self._match_runtimes.get(game_id)
+            if runtime is None:
+                return False, "match_not_found", game_id
+
+            if runtime.status != "running":
+                return False, "match_finished", game_id
+
+            snake = runtime.snakes.get(player)
+            if snake is None:
+                return False, "player_not_in_match", game_id
+
+            if not snake.alive:
+                return False, "player_not_alive", game_id
+
+            if direction not in {"up", "down", "left", "right"}:
+                return False, "invalid_direction", game_id
+
+            return True, "ok", game_id
+
+    def get_match_player_sockets(self, game_id: str) -> list[socket.socket]:
+        """
+        Sprint 4 PBI 4.12 helper: resolve active-player sockets for one match.
+
+        The caller can iterate this list to broadcast authoritative GAME_STATE
+        updates only to players in the active match.
+        """
+
+        with self._lock:
+            players = self._active_matches.get(game_id)
+            if players is None:
+                return []
+
+            sockets: list[socket.socket] = []
+            for username in players:
+                client_id = self._username_to_client.get(username)
+                if client_id is None:
+                    continue
+                sock = self._client_sockets.get(client_id)
+                if sock is not None:
+                    sockets.append(sock)
+            return sockets
+
     def _cleanup_user_lobby_state(self, username: str) -> None:
         """Internal cleanup for invitation/match state linked to a user."""
 

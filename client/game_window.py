@@ -32,15 +32,21 @@ from shared.protocol import (
     make_username_message,
 )
 
-WINDOW_WIDTH = 1000
-WINDOW_HEIGHT = 700
+WINDOW_WIDTH = 1220
+WINDOW_HEIGHT = 780
 WINDOW_TITLE = "Python-Arena - Sprint 4"
 TARGET_FPS = 60
-MOVE_INTERVAL_MS = 140
-BOARD_COLS = 20
-BOARD_ROWS = 20
+MOVE_INTERVAL_MS = 220
+BOARD_COLS = 28
+BOARD_ROWS = 24
 CELL_SIZE = 24
 GRID_LINE_WIDTH = 1
+BASE_SNAKE_LENGTH = 3
+HEALTH_PER_GROWTH_SEGMENT = 10
+PIE_HEALTH_GAIN = 10
+OBSTACLE_COLLISION_DAMAGE = 12
+SNAKE_COLLISION_DAMAGE = 16
+TARGET_PIE_COUNT = 4
 BG_COLOR = (16, 20, 28)
 PANEL_COLOR = (28, 35, 48)
 TEXT_COLOR = (235, 241, 248)
@@ -130,8 +136,9 @@ class PygameArenaWindow:
         # PBI 4.4 baseline pie rendering.
         self.pies: list[tuple[int, int]] = [(7, 5), (12, 14)]
         # PBI 4.5 baseline obstacle rendering.
-        self.obstacles: list[tuple[int, int]] = [(9, 7), (10, 7), (9, 12), (10, 12), (5, 10), (14, 10)]
+        self.obstacles: list[tuple[int, int]] = []
         self.last_move_ms = pygame.time.get_ticks()
+        self._reset_local_round_layout()
         self._connect_to_server()
 
     def run(self) -> None:
@@ -269,6 +276,7 @@ class PygameArenaWindow:
             if action == "match_started":
                 self.active_game_id = payload.get("game_id")
                 self.pending_invite_to = None
+                self._reset_local_round_layout()
                 self.last_server_message = f"Match started ({self.active_game_id})"
                 return
 
@@ -382,17 +390,20 @@ class PygameArenaWindow:
         self.match_winner = str(state.get("winner", self.match_winner or "-"))
 
     def _update_movement(self) -> None:
-        """Send movement input at a fixed interval (server-authoritative rendering)."""
+        """Update local movement at a fixed interval and send input to backend."""
+
+        if self.show_result_screen:
+            return
 
         now = pygame.time.get_ticks()
         if now - self.last_move_ms < MOVE_INTERVAL_MS:
             return
 
         self.last_move_ms = now
-        # Preview movement before matchmaking completes so controls feel responsive.
-        if self.active_game_id is None:
-            self._step_preview_snake(self.snake_a, self.snake_a_direction)
-            self._step_preview_snake(self.snake_b, self.snake_b_direction)
+        self._step_local_physics()
+        self._check_local_game_over()
+        if self.show_result_screen:
+            return
         self._send_movement_command(self.snake_a_direction)
 
     def _send_movement_command(self, direction: str) -> None:
@@ -420,13 +431,162 @@ class PygameArenaWindow:
         except OSError:
             self.last_server_message = "Failed to send movement"
 
-    def _step_preview_snake(self, snake_cells: list[tuple[int, int]], direction: str) -> None:
-        """Move one snake locally for pre-match visual feedback."""
+    def _step_local_physics(self) -> None:
+        """
+        Apply local gameplay physics for both snakes.
+
+        This keeps controls responsive even before/without authoritative physics
+        from the backend.
+        """
+
+        self._step_preview_snake(
+            snake_cells=self.snake_a,
+            direction=self.snake_a_direction,
+            own_health_attr="snake_a_health",
+            opponent_cells=self.snake_b,
+        )
+        self._step_preview_snake(
+            snake_cells=self.snake_b,
+            direction=self.snake_b_direction,
+            own_health_attr="snake_b_health",
+            opponent_cells=self.snake_a,
+        )
+        self._ensure_pies_available()
+
+    def _is_out_of_bounds(self, x: int, y: int) -> bool:
+        """Return True when a cell is outside board boundaries."""
+
+        return x < 0 or x >= BOARD_COLS or y < 0 or y >= BOARD_ROWS
+
+    def _pushback_cell(self, head_x: int, head_y: int, dx: int, dy: int) -> tuple[int, int]:
+        """Compute one-cell pushback position opposite to travel direction."""
+
+        return (head_x - dx, head_y - dy)
+
+    def _random_open_cell(self) -> tuple[int, int] | None:
+        """Pick one free board cell not occupied by snakes, pies, or obstacles."""
+
+        occupied = set(self.snake_a) | set(self.snake_b) | set(self.pies) | set(self.obstacles)
+        candidates = [
+            (x, y)
+            for x in range(BOARD_COLS)
+            for y in range(BOARD_ROWS)
+            if (x, y) not in occupied
+        ]
+        if not candidates:
+            return None
+        return candidates[pygame.time.get_ticks() % len(candidates)]
+
+    def _ensure_pies_available(self) -> None:
+        """Keep spawning pies during the round so pickups never stop."""
+
+        while len(self.pies) < TARGET_PIE_COUNT:
+            cell = self._random_open_cell()
+            if cell is None:
+                break
+            self.pies.append(cell)
+
+    def _reset_local_round_layout(self) -> None:
+        """Reset round pickups while keeping deterministic obstacle layout."""
+
+        self.obstacles = [
+            (2, 2),
+            (3, 2),
+            (24, 2),
+            (25, 2),
+            (2, 21),
+            (3, 21),
+            (24, 21),
+            (25, 21),
+            (6, 11),
+            (7, 11),
+            (13, 6),
+            (14, 6),
+            (13, 17),
+            (14, 17),
+            (20, 11),
+            (21, 11),
+        ]
+        self.pies = []
+        self._ensure_pies_available()
+
+    def _adjust_snake_length(self, snake_cells: list[tuple[int, int]], health: int) -> None:
+        """Grow snake as health exceeds 100 while keeping a minimum base length."""
+
+        growth_segments = max(0, (health - 100) // HEALTH_PER_GROWTH_SEGMENT)
+        target_length = BASE_SNAKE_LENGTH + growth_segments
+        if len(snake_cells) > target_length:
+            del snake_cells[target_length:]
+        elif len(snake_cells) < target_length and snake_cells:
+            snake_cells.extend([snake_cells[-1]] * (target_length - len(snake_cells)))
+
+    def _step_preview_snake(
+        self,
+        snake_cells: list[tuple[int, int]],
+        direction: str,
+        own_health_attr: str,
+        opponent_cells: list[tuple[int, int]],
+    ) -> None:
+        """Move one snake with obstacle/opponent collision damage and pushback."""
 
         dx, dy = _DIRECTIONS[direction]
         head_x, head_y = snake_cells[0]
-        snake_cells.insert(0, ((head_x + dx) % BOARD_COLS, (head_y + dy) % BOARD_ROWS))
-        snake_cells.pop()
+        next_head = (head_x + dx, head_y + dy)
+        own_health = int(getattr(self, own_health_attr))
+
+        hit_boundary = self._is_out_of_bounds(*next_head)
+        hit_obstacle = next_head in self.obstacles or hit_boundary
+        hit_opponent = next_head in opponent_cells
+        if hit_obstacle or hit_opponent:
+            damage = OBSTACLE_COLLISION_DAMAGE if hit_obstacle else SNAKE_COLLISION_DAMAGE
+            own_health = max(0, own_health - damage)
+            pushback = self._pushback_cell(head_x, head_y, dx, dy)
+            blocked_pushback = (
+                self._is_out_of_bounds(*pushback)
+                or pushback in self.obstacles
+                or pushback in opponent_cells
+                or pushback in snake_cells
+            )
+            if not blocked_pushback:
+                snake_cells.insert(0, pushback)
+                snake_cells.pop()
+            setattr(self, own_health_attr, own_health)
+            self._adjust_snake_length(snake_cells, own_health)
+            return
+
+        ate_pie = next_head in self.pies
+        snake_cells.insert(0, next_head)
+        if ate_pie:
+            own_health += PIE_HEALTH_GAIN
+            self.pies.remove(next_head)
+        else:
+            snake_cells.pop()
+        self._adjust_snake_length(snake_cells, own_health)
+        setattr(self, own_health_attr, own_health)
+
+    def _check_local_game_over(self) -> None:
+        """End local match immediately when a snake health reaches zero."""
+
+        if self.snake_a_health > 0 and self.snake_b_health > 0:
+            return
+
+        self.match_status = "finished"
+        self.show_result_screen = True
+        self.result_reason = "health_depleted"
+        self.result_scores = {
+            self.player_a_name: self.snake_a_health,
+            self.player_b_name: self.snake_b_health,
+        }
+        if self.snake_a_health <= 0 and self.snake_b_health <= 0:
+            self.result_winner = "Draw"
+            self.match_winner = "Draw"
+        elif self.snake_a_health <= 0:
+            self.result_winner = self.player_b_name
+            self.match_winner = self.player_b_name
+        else:
+            self.result_winner = self.player_a_name
+            self.match_winner = self.player_a_name
+        self.last_server_message = f"Local game over: {self.result_reason}"
 
     def _draw_frame(self) -> None:
         """Render the Sprint 4 gameplay shell and board."""
@@ -442,8 +602,8 @@ class PygameArenaWindow:
         hint = self.font_hint.render("Move: Arrows/WASD  |  ESC: exit", True, SUBTEXT_COLOR)
 
         self.screen.blit(title, (100, 84))
-        self.screen.blit(body, (100, 640))
-        self.screen.blit(hint, (730, 640))
+        self.screen.blit(body, (100, 700))
+        self.screen.blit(hint, (860, 700))
 
         self._draw_board()
         self._draw_obstacles()
@@ -537,7 +697,7 @@ class PygameArenaWindow:
     def _draw_health_scores(self) -> None:
         """Render health scores for both snakes."""
 
-        score_panel = pygame.Rect(620, 120, 230, 160)
+        score_panel = pygame.Rect(840, 120, 300, 190)
         pygame.draw.rect(self.screen, BOARD_BG_COLOR, score_panel, border_radius=10)
         pygame.draw.rect(self.screen, ACCENT_COLOR, score_panel, width=2, border_radius=10)
 
@@ -547,11 +707,11 @@ class PygameArenaWindow:
         p2_label = self.font_score_label.render(self.player_b_name, True, SNAKE_B_HEAD_COLOR)
         p2_value = self.font_score.render(str(self.snake_b_health), True, SNAKE_B_BODY_COLOR)
 
-        self.screen.blit(title, (690, 136))
-        self.screen.blit(p1_label, (642, 178))
-        self.screen.blit(p1_value, (770, 172))
-        self.screen.blit(p2_label, (642, 225))
-        self.screen.blit(p2_value, (770, 219))
+        self.screen.blit(title, (940, 136))
+        self.screen.blit(p1_label, (862, 178))
+        self.screen.blit(p1_value, (1070, 172))
+        self.screen.blit(p2_label, (862, 225))
+        self.screen.blit(p2_value, (1070, 219))
 
         status = self.font_hint.render(f"Server: {self.last_server_message}", True, SUBTEXT_COLOR)
         attempted = self.font_hint.render(f"Movement Attempted: {self.attempted_movement_commands}", True, SUBTEXT_COLOR)
@@ -562,15 +722,15 @@ class PygameArenaWindow:
         game_meta = self.font_hint.render(f"Game: {self.active_game_id or '-'}  Status: {self.match_status}", True, SUBTEXT_COLOR)
         timer_meta = self.font_hint.render(f"Timer: remaining={self.timer_remaining}s elapsed={self.timer_elapsed}s", True, SUBTEXT_COLOR)
         winner_meta = self.font_hint.render(f"Winner: {self.match_winner}", True, SUBTEXT_COLOR)
-        self.screen.blit(status, (620, 300))
-        self.screen.blit(attempted, (620, 328))
-        self.screen.blit(sent, (620, 356))
-        self.screen.blit(last_input, (620, 384))
-        self.screen.blit(accepted, (620, 412))
-        self.screen.blit(rejected, (620, 440))
-        self.screen.blit(game_meta, (620, 468))
-        self.screen.blit(timer_meta, (620, 496))
-        self.screen.blit(winner_meta, (620, 524))
+        self.screen.blit(status, (840, 340))
+        self.screen.blit(attempted, (840, 368))
+        self.screen.blit(sent, (840, 396))
+        self.screen.blit(last_input, (840, 424))
+        self.screen.blit(accepted, (840, 452))
+        self.screen.blit(rejected, (840, 480))
+        self.screen.blit(game_meta, (840, 508))
+        self.screen.blit(timer_meta, (840, 536))
+        self.screen.blit(winner_meta, (840, 564))
 
     def _draw_result_screen(self) -> None:
         """PBI 4.10: render end-of-game result overlay."""

@@ -232,6 +232,25 @@ def _handle_movement_message(
         send_message(client_socket, make_error_message("Movement player mismatch."))
         return
 
+    # Sprint 4 PBI 4.11: perform explicit movement validation before update.
+    is_valid, validation_reason, validated_game_id = server_state.validate_movement_command(
+        player=player,
+        direction=direction,
+    )
+    if not is_valid:
+        reason_to_message = {
+            "invalid_direction": "Invalid movement direction.",
+            "player_not_in_match": "You are not in an active match.",
+            "match_not_found": "Match state could not be found.",
+            "player_not_alive": "Your snake is no longer active.",
+            "match_finished": "Match has already ended.",
+        }
+        send_message(
+            client_socket,
+            make_error_message(reason_to_message.get(validation_reason, "Movement rejected.")),
+        )
+        return
+
     success, reason, game_id, state_dict, game_over_payload = server_state.process_player_movement(
         player=player,
         direction=direction,
@@ -239,7 +258,7 @@ def _handle_movement_message(
 
     # Server-side movement trace for multi-match debugging.
     # Includes game_id so concurrent matches are easy to differentiate.
-    trace_game_id = game_id or "unknown"
+    trace_game_id = game_id or validated_game_id or "unknown"
     print(
         f"[MOVE][game={trace_game_id}] player={player} direction={direction} "
         f"result={'ok' if success else 'rejected'} reason={reason}"
@@ -260,18 +279,15 @@ def _handle_movement_message(
         send_message(client_socket, make_error_message("Internal state update failed."))
         return
 
-    players = server_state.get_match_players(game_id)
-    if players is None:
-        send_message(client_socket, make_error_message("Unable to resolve match players."))
+    # Sprint 4 PBI 4.12: broadcast updated state to active players only.
+    sockets = server_state.get_match_player_sockets(game_id)
+    if not sockets:
+        send_message(client_socket, make_error_message("Unable to resolve active match players."))
         return
 
-    sockets = [server_state.get_socket_for_username(players[0]), server_state.get_socket_for_username(players[1])]
-
-    # PBI 3.12: broadcast packaged authoritative game state each update.
+    # PBI 4.12 + PBI 3.12: broadcast packaged authoritative game state each update.
     game_state_message = make_game_state_message(game_id=game_id, state=state_dict)
     for sock in sockets:
-        if sock is None:
-            continue
         try:
             send_message(sock, game_state_message)
         except OSError:
@@ -290,8 +306,6 @@ def _handle_movement_message(
             reason=game_over_payload.get("reason"),
         )
         for sock in sockets:
-            if sock is None:
-                continue
             try:
                 send_message(sock, game_over_message)
             except OSError:
