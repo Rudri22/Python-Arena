@@ -273,6 +273,15 @@ class ArenaGuiApp:
 
         if self._switching_to_pygame:
             return
+
+        target_player = self._selected_opponent()
+        if target_player is None:
+            messagebox.showwarning(
+                "Select Spectate Target",
+                "Select a player from 'Online Players' to spectate their match.",
+            )
+            return
+
         self._switching_to_pygame = True
 
         server_ip = self.server_ip_var.get().strip() or "127.0.0.1"
@@ -281,7 +290,7 @@ class ArenaGuiApp:
         except ValueError:
             server_port = 5000
 
-        self._append_log("[SPECTATOR] Switching to Pygame spectator window...")
+        self._append_log(f"[SPECTATOR] Switching to spectator view for {target_player}...")
         self._disconnect(silent=True)
         self.root.destroy()
 
@@ -291,6 +300,7 @@ class ArenaGuiApp:
             server_ip=server_ip,
             server_port=server_port,
             username=self.username,
+            preferred_opponent=target_player,
             spectator_mode=True,
         )
 

@@ -111,6 +111,8 @@ class PygameArenaWindow:
         self.preferred_opponent = preferred_opponent
         self.pending_invite_to: str | None = None
         self.pending_invite_sent_ms = 0
+        self.pending_spectate_to: str | None = None
+        self.pending_spectate_sent_ms = 0
         self.last_server_message = "Connecting..."
         self.last_input_direction = "-"
         self.last_sent_direction = "-"
@@ -282,7 +284,11 @@ class PygameArenaWindow:
         if self.connection is None:
             return
         try:
-            self.connection.send_message(make_chat_message(sender=self.username, message="CHEER!"))
+            cheer_message = make_chat_message(sender=self.username, message="/cheer CHEER!")
+            cheer_message["payload"]["kind"] = "cheer"
+            if self.active_game_id is not None:
+                cheer_message["payload"]["game_id"] = self.active_game_id
+            self.connection.send_message(cheer_message)
         except OSError:
             self.chat_messages.append("[CHAT] Cheer send failed.")
 
@@ -371,7 +377,9 @@ class PygameArenaWindow:
             self.online_users = list(users)
             self.username_confirmed = any(user.casefold() == self.username.casefold() for user in users)
             self.last_server_message = f"Online users: {len(users)}"
-            if not self.spectator_mode:
+            if self.spectator_mode:
+                self._maybe_request_spectate()
+            else:
                 self._maybe_send_auto_invite()
             return
 
@@ -410,6 +418,20 @@ class PygameArenaWindow:
                 self.pending_invite_to = None
                 self._reset_local_round_layout()
                 self.last_server_message = f"Match started ({self.active_game_id})"
+                return
+
+            if action == "spectate_joined":
+                self.active_game_id = payload.get("game_id", self.active_game_id)
+                self.pending_spectate_to = None
+                self.pending_spectate_sent_ms = 0
+                self.last_server_message = f"Spectating match ({self.active_game_id})"
+                return
+
+            if action == "spectate_left":
+                self.active_game_id = None
+                self.pending_spectate_to = None
+                self.pending_spectate_sent_ms = 0
+                self.last_server_message = "Stopped spectating."
                 return
 
             if action in {"declined", "cancelled"}:
@@ -456,7 +478,12 @@ class PygameArenaWindow:
                 # Retry invite flow if server rejected previous attempt.
                 self.pending_invite_to = None
                 self.pending_invite_sent_ms = 0
-                self._maybe_send_auto_invite()
+                self.pending_spectate_to = None
+                self.pending_spectate_sent_ms = 0
+                if self.spectator_mode:
+                    self._maybe_request_spectate()
+                else:
+                    self._maybe_send_auto_invite()
             if (
                 "connection" in message_text
                 or "disconnect" in message_text
@@ -514,6 +541,37 @@ class PygameArenaWindow:
         self.pending_invite_to = opponent
         self.pending_invite_sent_ms = pygame.time.get_ticks()
         self.last_server_message = f"Invited {opponent}"
+
+    def _maybe_request_spectate(self) -> None:
+        """Sprint 6 PBI 6.8/6.9: join an active match as spectator."""
+
+        if self.connection is None or not self.username_confirmed or self.active_game_id is not None:
+            return
+        if self.pending_spectate_to is not None:
+            return
+
+        targets = [user for user in self.online_users if user.casefold() != self.username.casefold()]
+        if not targets:
+            self.last_server_message = "Waiting for players to spectate..."
+            return
+
+        preferred = self.preferred_opponent
+        if preferred is not None:
+            matching = [user for user in targets if user.casefold() == preferred.casefold()]
+            target = matching[0] if matching else targets[0]
+        else:
+            target = targets[0]
+
+        self.connection.send_message(
+            make_invitation_message(
+                from_user=self.username,
+                to_user=target,
+                action="spectate",
+            )
+        )
+        self.pending_spectate_to = target
+        self.pending_spectate_sent_ms = pygame.time.get_ticks()
+        self.last_server_message = f"Requesting spectate of {target}..."
 
     def _sync_from_game_state(self, state: dict) -> None:
         """Update rendered board entities from authoritative backend state."""
