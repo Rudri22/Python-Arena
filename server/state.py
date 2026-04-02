@@ -93,6 +93,46 @@ class ServerState:
 
             return sorted(self._username_to_client.keys())
 
+    def unregister_client_with_events(self, client_id: str) -> list[dict[str, Any]]:
+        """
+        Sprint 5 PBI 5.4 + 5.5: unregister and return disconnect-driven events.
+
+        Event shape:
+        - {"type": "match_abandoned", "game_id": str, "players": (p1, p2), "winner": str}
+        """
+
+        with self._lock:
+            events: list[dict[str, Any]] = []
+            self.connected_clients = max(0, self.connected_clients - 1)
+            previous_username = self._client_usernames.pop(client_id, None)
+            self._client_sockets.pop(client_id, None)
+
+            if previous_username is None:
+                return events
+
+            owner_id = self._username_to_client.get(_normalize_username(previous_username))
+            if owner_id == client_id:
+                self._username_to_client.pop(_normalize_username(previous_username), None)
+
+            game_id = self._user_to_match.get(previous_username)
+            if game_id is not None:
+                players = self._active_matches.get(game_id)
+                if players is not None:
+                    opponent = players[0] if players[1] == previous_username else players[1]
+                    events.append(
+                        {
+                            "type": "match_abandoned",
+                            "game_id": game_id,
+                            "players": players,
+                            "winner": opponent,
+                            "disconnected_player": previous_username,
+                        }
+                    )
+                self._teardown_match_locked(game_id)
+
+            self._cleanup_user_lobby_state(previous_username)
+            return events
+
     def set_client_username(self, client_id: str, username: str) -> tuple[bool, str]:
         """Assign username if unique; returns status tuple (accepted/reason)."""
 
@@ -273,11 +313,8 @@ class ServerState:
                 }
                 return False, reason_map.get(reason, "movement_rejected"), game_id, None, None
 
-            # Progress simulation immediately on each accepted movement command.
-            # This keeps client rendering responsive even when players are not
-            # sending perfectly synchronized lockstep inputs.
-            if runtime.status == "running":
-                step_runtime(runtime)
+            # Sprint 5 PBI 5.1: movement is queued here, while simulation
+            # stepping is handled by the continuous server game loop.
 
             state_dict = to_protocol_state(runtime)
             game_over_payload: dict[str, Any] | None = None
@@ -294,6 +331,59 @@ class ServerState:
                 }
 
             return True, "updated", game_id, state_dict, game_over_payload
+
+    def step_active_matches(self) -> list[dict[str, Any]]:
+        """
+        Sprint 5 PBI 5.1 + 5.6: advance all active matches and collect updates.
+
+        Returns per-match update payloads ready for broadcast:
+        - game_id
+        - players
+        - state
+        - optional game_over payload
+        """
+
+        with self._lock:
+            updates: list[dict[str, Any]] = []
+            games_to_cleanup: list[str] = []
+
+            for game_id, runtime in list(self._match_runtimes.items()):
+                if runtime.status == "running":
+                    step_runtime(runtime)
+
+                players = self._active_matches.get(game_id)
+                if players is None:
+                    games_to_cleanup.append(game_id)
+                    continue
+
+                game_over_payload: dict[str, Any] | None = None
+                if runtime.status == "finished":
+                    final_scores = {
+                        username: runtime.snakes[username].health
+                        for username in runtime.players
+                    }
+                    game_over_payload = {
+                        "game_id": game_id,
+                        "winner": runtime.winner or "draw",
+                        "final_scores": final_scores,
+                        "reason": runtime.end_reason or "match_finished",
+                    }
+                    games_to_cleanup.append(game_id)
+
+                updates.append(
+                    {
+                        "game_id": game_id,
+                        "players": players,
+                        "state": to_protocol_state(runtime),
+                        "game_over": game_over_payload,
+                    }
+                )
+
+            # Sprint 5 PBI 5.6: clean ended sessions after publishing final state.
+            for game_id in games_to_cleanup:
+                self._teardown_match_locked(game_id)
+
+            return updates
 
     def validate_movement_command(self, player: str, direction: str) -> tuple[bool, str, str | None]:
         """
@@ -346,13 +436,20 @@ class ServerState:
 
             sockets: list[socket.socket] = []
             for username in players:
-                client_id = self._username_to_client.get(username)
+                client_id = self._username_to_client.get(_normalize_username(username))
                 if client_id is None:
                     continue
                 sock = self._client_sockets.get(client_id)
                 if sock is not None:
                     sockets.append(sock)
             return sockets
+
+    def get_idle_users(self) -> list[str]:
+        """Sprint 5 PBI 5.3: list online users who are not in active matches."""
+
+        with self._lock:
+            online_users = [username for username in self._client_usernames.values() if username is not None]
+            return sorted([user for user in online_users if user not in self._user_to_match], key=str.casefold)
 
     def _cleanup_user_lobby_state(self, username: str) -> None:
         """Internal cleanup for invitation/match state linked to a user."""
@@ -365,12 +462,7 @@ class ServerState:
 
         game_id = self._user_to_match.pop(username, None)
         if game_id is not None:
-            players = self._active_matches.pop(game_id, None)
-            self._match_runtimes.pop(game_id, None)
-            if players is not None:
-                for player in players:
-                    if player != username:
-                        self._user_to_match.pop(player, None)
+            self._teardown_match_locked(game_id)
 
     def _resolve_username(self, username: str) -> str | None:
         """
@@ -381,3 +473,17 @@ class ServerState:
         if client_id is None:
             return None
         return self._client_usernames.get(client_id)
+
+    def _teardown_match_locked(self, game_id: str) -> None:
+        """
+        Remove one match and clear all player->match links.
+
+        This helper requires the caller to already hold `self._lock`.
+        """
+
+        players = self._active_matches.pop(game_id, None)
+        self._match_runtimes.pop(game_id, None)
+        if players is None:
+            return
+        for player in players:
+            self._user_to_match.pop(player, None)
