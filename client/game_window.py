@@ -92,6 +92,8 @@ class PygameArenaWindow:
         username: str,
         preferred_opponent: str | None = None,
         spectator_mode: bool = False,
+        return_to_tk_lobby: bool = True,
+        keep_window_open_on_return: bool = False,
     ) -> None:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
@@ -101,6 +103,8 @@ class PygameArenaWindow:
         self.server_ip = server_ip
         self.server_port = server_port
         self.username = username
+        self.return_to_tk_lobby = return_to_tk_lobby
+        self.keep_window_open_on_return = keep_window_open_on_return
         # Sprint 6 PBI 6.8: spectator mode client-side runtime flag.
         self.spectator_mode = spectator_mode
         self.connection: ClientConnection | None = None
@@ -178,7 +182,7 @@ class PygameArenaWindow:
         self._reset_local_round_layout()
         self._connect_to_server()
 
-    def run(self) -> None:
+    def run(self) -> bool:
         """Start the main window loop until user exits."""
 
         while self.running:
@@ -190,9 +194,16 @@ class PygameArenaWindow:
             self.clock.tick(TARGET_FPS)
 
         self._disconnect_from_server()
-        pygame.quit()
-        if self.return_to_lobby_requested:
+        if self.return_to_lobby_requested and self.return_to_tk_lobby:
+            pygame.quit()
             self._launch_lobby()
+        elif self.return_to_lobby_requested and self.keep_window_open_on_return:
+            # Keep current pygame window alive so caller can switch scene
+            # without closing/reopening another native window.
+            pass
+        else:
+            pygame.quit()
+        return self.return_to_lobby_requested
 
     def _launch_lobby(self) -> None:
         """Return player to Tkinter lobby with same connection settings."""
@@ -1201,7 +1212,9 @@ def main(
     username: str = "Player",
     preferred_opponent: str | None = None,
     spectator_mode: bool = False,
-) -> None:
+    return_to_tk_lobby: bool = True,
+    keep_window_open_on_return: bool = False,
+) -> bool:
     """Entrypoint for launching the Sprint 4 Pygame client window."""
 
     app = PygameArenaWindow(
@@ -1210,8 +1223,10 @@ def main(
         username=username,
         preferred_opponent=preferred_opponent,
         spectator_mode=spectator_mode,
+        return_to_tk_lobby=return_to_tk_lobby,
+        keep_window_open_on_return=keep_window_open_on_return,
     )
-    app.run()
+    return app.run()
 
 
 if __name__ == "__main__":

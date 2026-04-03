@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Launch Pygame in spectator mode (view-only).",
     )
+    parser.add_argument(
+        "--prelobby",
+        action="store_true",
+        help="Launch Pygame pre-lobby screen.",
+    )
 
     return parser.parse_args()
 
@@ -219,6 +224,27 @@ def run_client(server_ip: str, server_port: int, username: str) -> None:
         connection.close()
 
 
+def check_username_available(server_ip: str, server_port: int, username: str) -> tuple[bool, str]:
+    """
+    Perform a lightweight server-side username reservation check.
+
+    Returns (is_available, message).
+    """
+
+    connection = ClientConnection(server_ip=server_ip, server_port=server_port)
+    try:
+        # consume connect ack
+        connection.receive_message()
+        connection.send_message(make_username_message(username))
+        response = connection.receive_message()
+        if response.get("type") == MessageType.ERROR.value:
+            message = str(response.get("payload", {}).get("message", "Username unavailable."))
+            return False, message
+        return True, "Username accepted."
+    finally:
+        connection.close()
+
+
 def main() -> None:
     """CLI entry point function for the client app."""
 
@@ -230,6 +256,41 @@ def main() -> None:
     if args.gui and args.spectator:
         show_system("Spectator mode is available only with --pygame.")
         raise SystemExit(1)
+    if args.prelobby and (args.gui or args.pygame or args.spectator):
+        show_system("Choose only one UI mode: --prelobby, --gui, or --pygame.")
+        raise SystemExit(1)
+
+    if args.prelobby:
+        from client.prelobby_pygame import run_prelobby_to_lobby
+
+        try:
+            validate_server_address(args.server_ip, args.server_port)
+        except ValueError as error:
+            show_system(f"Invalid client arguments: {error}")
+            raise SystemExit(1) from error
+
+        def _validate_for_prelobby(candidate: str) -> tuple[bool, str]:
+            is_valid, result_message = validate_username(candidate)
+            if not is_valid:
+                return False, result_message
+            try:
+                is_available, _availability_message = check_username_available(
+                    args.server_ip,
+                    args.server_port,
+                    candidate,
+                )
+            except (ConnectionError, TimeoutError, OSError):
+                return False, "Server unavailable. Check connection and try again."
+            if not is_available:
+                return False, "Username taken. Please choose another one."
+            return True, "Username accepted."
+
+        run_prelobby_to_lobby(
+            server_ip=args.server_ip,
+            server_port=args.server_port,
+            username_validator=_validate_for_prelobby,
+        )
+        return
 
     if args.pygame or args.spectator:
         # Import lazily so terminal mode does not require pygame at import-time.
