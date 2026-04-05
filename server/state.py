@@ -55,6 +55,9 @@ class ServerState:
     # Maps normalized username -> client_id (case-insensitive uniqueness).
     _username_to_client: dict[str, str] = field(default_factory=dict)
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
+    # Per-online-username reconnect/session version to detect leave+rejoin.
+    _user_session_versions: dict[str, int] = field(default_factory=dict)
+    _next_user_session_version: int = 1
 
     # Invitation and matchmaking registry.
     _pending_invites: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -94,6 +97,7 @@ class ServerState:
                 owner_id = self._username_to_client.get(_normalize_username(previous_username))
                 if owner_id == client_id:
                     self._username_to_client.pop(_normalize_username(previous_username), None)
+                    self._user_session_versions.pop(previous_username, None)
                 self._cleanup_user_lobby_state(previous_username)
 
             return sorted(self._username_to_client.keys())
@@ -124,6 +128,7 @@ class ServerState:
             owner_id = self._username_to_client.get(_normalize_username(previous_username))
             if owner_id == client_id:
                 self._username_to_client.pop(_normalize_username(previous_username), None)
+                self._user_session_versions.pop(previous_username, None)
 
             game_id = self._find_game_id_for_user_locked(previous_username)
             if game_id is not None:
@@ -182,10 +187,13 @@ class ServerState:
             previous_username = self._client_usernames[client_id]
             if previous_username is not None and previous_username != username:
                 self._username_to_client.pop(_normalize_username(previous_username), None)
+                self._user_session_versions.pop(previous_username, None)
                 self._cleanup_user_lobby_state(previous_username)
 
             self._client_usernames[client_id] = username
             self._username_to_client[normalized_username] = client_id
+            self._user_session_versions[username] = self._next_user_session_version
+            self._next_user_session_version += 1
             return True, "accepted"
 
     def get_client_username(self, client_id: str) -> str | None:
@@ -202,6 +210,17 @@ class ServerState:
                 [username for username in self._client_usernames.values() if username is not None],
                 key=str.casefold,
             )
+
+    def get_online_user_sessions(self) -> dict[str, int]:
+        """Return online usernames mapped to their current session version."""
+
+        with self._lock:
+            result: dict[str, int] = {}
+            for username in self._client_usernames.values():
+                if username is None:
+                    continue
+                result[username] = self._user_session_versions.get(username, 0)
+            return result
 
     def get_client_sockets(self) -> list[socket.socket]:
         """Return currently connected sockets for broadcast operations."""
@@ -236,13 +255,10 @@ class ServerState:
                 return False, "cannot_invite_self"
             if from_user in self._user_to_match or to_user in self._user_to_match:
                 return False, "user_in_match"
-            if from_user in self._busy_invite_users or to_user in self._busy_invite_users:
-                return False, "user_busy"
-
             invite_key = (from_user, to_user)
+            if invite_key in self._pending_invites:
+                return False, "user_busy"
             self._pending_invites[invite_key] = "pending"
-            self._busy_invite_users.add(from_user)
-            self._busy_invite_users.add(to_user)
             return True, "pending"
 
     def mark_match_handoff(self, username: str, ttl_seconds: float = 8.0) -> tuple[bool, str]:
@@ -278,14 +294,10 @@ class ServerState:
 
             if action == "cancel":
                 self._pending_invites.pop(invite_key, None)
-                self._busy_invite_users.discard(from_user)
-                self._busy_invite_users.discard(to_user)
                 return True, "cancelled", None
 
             if action == "decline":
                 self._pending_invites.pop(invite_key, None)
-                self._busy_invite_users.discard(from_user)
-                self._busy_invite_users.discard(to_user)
                 return True, "declined", None
 
             if action == "accept":
@@ -293,8 +305,10 @@ class ServerState:
                     return False, "user_in_match", None
 
                 self._pending_invites.pop(invite_key, None)
-                self._busy_invite_users.discard(from_user)
-                self._busy_invite_users.discard(to_user)
+                # Once a match is accepted, clear any other invite rows involving
+                # either matched player so lobby invite state stays consistent.
+                self._cleanup_user_invites_locked(from_user)
+                self._cleanup_user_invites_locked(to_user)
 
                 game_id = f"game-{uuid4().hex[:8]}"
                 self._active_matches[game_id] = (from_user, to_user)
@@ -728,8 +742,6 @@ class ServerState:
         invites_to_remove = [key for key in self._pending_invites if username in key]
         for from_user, to_user in invites_to_remove:
             self._pending_invites.pop((from_user, to_user), None)
-            self._busy_invite_users.discard(from_user)
-            self._busy_invite_users.discard(to_user)
 
     def _is_handoff_active_locked(self, game_id: str) -> bool:
         """Check if a match is currently in reconnect handoff grace window."""

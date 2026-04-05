@@ -77,4 +77,9 @@ class ClientConnection:
     def close(self) -> None:
         """Close the underlying socket."""
 
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            # Socket may already be closed or half-closed.
+            pass
         self.socket.close()

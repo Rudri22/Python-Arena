@@ -46,6 +46,7 @@ def broadcast_online_users(server_state: ServerState) -> None:
     # Sprint 5 PBI 5.3: expose lobby-vs-active split for UI clarity.
     message["payload"]["idle_users"] = server_state.get_idle_users()
     message["payload"]["active_players"] = len(users) - len(message["payload"]["idle_users"])
+    message["payload"]["user_sessions"] = server_state.get_online_user_sessions()
 
     for sock in server_state.get_client_sockets():
         try:
@@ -202,8 +203,13 @@ def _handle_invitation_message(
         return
 
     if action in {"accept", "decline", "cancel"}:
-        # For response actions, connected sender should be the invited user (`to_user`).
-        if to_user.casefold() != sender_username.casefold():
+        # - accept/decline are sent by invitee (`to_user`)
+        # - cancel is sent by inviter (`from_user`)
+        if action == "cancel":
+            if from_user.casefold() != sender_username.casefold():
+                send_message(client_socket, make_error_message("Invitation canceller mismatch."))
+                return
+        elif to_user.casefold() != sender_username.casefold():
             send_message(client_socket, make_error_message("Invitation responder mismatch."))
             return
 
