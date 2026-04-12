@@ -97,6 +97,81 @@ def _handle_invitation_message(
         send_message(client_socket, make_error_message("Username must be set before invitations."))
         return
 
+    if action == "quick_match":
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Quick Match sender mismatch."))
+            return
+
+        success, reason, opponent, game_id = server_state.request_quick_match(from_user)
+        if not success:
+            reason_to_error = {
+                "user_offline": "Quick Match failed: user offline.",
+                "user_in_match": "You are already in a match.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Quick Match failed.")))
+            return
+
+        if reason in {"waiting", "already_waiting"}:
+            send_message(
+                client_socket,
+                make_invitation_message(
+                    from_user="SERVER",
+                    to_user=sender_username,
+                    action="waiting",
+                ),
+            )
+            return
+
+        if reason == "matched" and game_id is not None and opponent is not None:
+            p1_socket = server_state.get_socket_for_username(opponent)
+            p2_socket = server_state.get_socket_for_username(sender_username)
+            start_message = make_invitation_message(
+                from_user=opponent,
+                to_user=sender_username,
+                action="match_started",
+                game_id=game_id,
+            )
+            for sock in [p1_socket, p2_socket]:
+                if sock is None:
+                    continue
+                try:
+                    send_message(sock, start_message)
+                except OSError:
+                    continue
+
+            initial_state = server_state.get_match_state_dict(game_id)
+            if initial_state is not None:
+                game_state_message = make_game_state_message(game_id=game_id, state=initial_state)
+                for sock in [p1_socket, p2_socket]:
+                    if sock is None:
+                        continue
+                    try:
+                        send_message(sock, game_state_message)
+                    except OSError:
+                        continue
+            return
+
+    if action == "quick_cancel":
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Quick Match cancel sender mismatch."))
+            return
+        success, reason = server_state.cancel_quick_match(from_user)
+        if not success:
+            reason_to_error = {
+                "user_offline": "Quick Match cancel failed: user offline.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Quick Match cancel failed.")))
+            return
+        send_message(
+            client_socket,
+            make_invitation_message(
+                from_user="SERVER",
+                to_user=sender_username,
+                action="quick_cancelled",
+            ),
+        )
+        return
+
     if action == "spectate":
         # Spectator join:
         # - from_user must match connected sender
