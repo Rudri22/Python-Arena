@@ -9,6 +9,8 @@ This version intentionally focuses on environment art only:
 
 from __future__ import annotations
 
+import math
+import random
 from collections import deque
 from pathlib import Path
 
@@ -103,6 +105,78 @@ class PygameArenaWindow:
         self.lava_frames = self._load_lava_frames()
         self.lava_rock_frames = self._load_lava_rock_frames()
 
+        # Agent-based pool snakes: each has a real 2-D head position, a heading
+        # angle that wanders freely, and a position-history deque so body segments
+        # trail the head along the actual path (no fixed lane or strip).
+        _rng_s = random.Random(17)
+        _HIST = 300
+
+        def _mk(x: float, y: float, ang: float, spd: float, ln: int, sc: float, ph: float) -> dict:
+            return {
+                "x": x, "y": y,
+                "angle": ang, "target_angle": ang,
+                "speed": spd, "length": ln, "scale": sc, "phase": ph,
+                "turn_rate": _rng_s.uniform(1.0, 2.0),
+                "turn_timer": _rng_s.uniform(0.5, 2.0),
+                "history": deque([(x, y)] * _HIST, maxlen=_HIST),
+            }
+
+        self.snakes = [
+            # Left strip area
+            _mk(45.0,  200.0,  math.pi * 0.5,  62.0, 13, 0.95, 0.0),
+            _mk(68.0,  500.0,  math.pi * 1.5,  55.0, 11, 0.82, 1.5),
+            _mk(30.0,  700.0,  math.pi * 0.35, 48.0,  9, 0.72, 2.7),
+            # Right strip area
+            _mk(1175.0, 200.0, math.pi * 0.5,  58.0, 12, 0.90, 0.8),
+            _mk(1155.0, 480.0, math.pi * 1.7,  65.0, 14, 1.00, 1.9),
+            _mk(1185.0, 680.0, math.pi * 1.5,  52.0, 10, 0.78, 3.4),
+            # Bottom strip area
+            _mk(300.0,  750.0, 0.05,           70.0, 11, 0.86, 0.3),
+            _mk(850.0,  750.0, math.pi,        60.0, 12, 0.92, 2.4),
+        ]
+        del _mk, _rng_s
+
+        # Poison drip particles falling from the arch serpent.
+        rng = random.Random(42)
+        self._poison_drips = [
+            {
+                "t":        rng.uniform(0.05, 0.95),
+                "y_offset": rng.uniform(0, 100),
+                "vy":       rng.uniform(0.4, 1.4),
+                "alpha":    rng.randint(130, 220),
+                "size":     rng.randint(3, 6),
+            }
+            for _ in range(24)
+        ]
+
+        # Toxic-spike obstacles on the arena - clearly hazardous tiles to avoid.
+        # Each obstacle occupies a single tile (col, row) on the main grid.
+        self.obstacles = [
+            {"col": 3,  "row": 1, "phase": 0.0},
+            {"col": 16, "row": 1, "phase": 0.7},
+            {"col": 3,  "row": 7, "phase": 1.4},
+            {"col": 16, "row": 7, "phase": 2.1},
+            {"col": 7,  "row": 4, "phase": 2.8},
+            {"col": 12, "row": 4, "phase": 3.5},
+        ]
+
+        # Big serpent throwing state machine.
+        # IDLE -> WIND_UP -> THROW (blob spawns) -> RECOVER -> IDLE, every ~5s.
+        now_ms = pygame.time.get_ticks()
+        self._throw_state = "idle"
+        self._throw_state_start = now_ms
+        self._next_throw_time = now_ms + 2500  # first throw 2.5s after start
+        self._throw_blob_spawned = False
+        self._poison_blobs: list[dict] = []
+
+        # Frame timing for delta-time-based motion (snakes, blobs).
+        self._last_tick_ms = now_ms
+        self._step_dt = 1.0 / TARGET_FPS
+
+    # ------------------------------------------------------------------
+    # Castle wall loading (kept for castle_tile_texture; never drawn)
+    # ------------------------------------------------------------------
+
     def _load_castle_wall(self, filename: str) -> pygame.Surface | None:
         """Load unified top wall and strip uniform backdrop to transparency."""
 
@@ -115,9 +189,6 @@ class PygameArenaWindow:
             return None
 
         cleaned = self._remove_wall_backdrop(src)
-        # Edge-aware opacity with hole-filling:
-        # 1) Flood-fill transparent pixels connected to image borders (true outside bg).
-        # 2) Everything not in outside bg is considered castle interior and made opaque.
         w, h = cleaned.get_size()
         outside = [[False] * w for _ in range(h)]
         q: deque[tuple[int, int]] = deque()
@@ -149,15 +220,12 @@ class PygameArenaWindow:
             for x in range(w):
                 r, g, b, a = cleaned.get_at((x, y))
                 if outside[y][x]:
-                    # True background remains transparent.
                     continue
                 if a > 0:
                     opaque.set_at((x, y), (r, g, b, 255))
                 else:
-                    # Interior transparent holes become opaque backing.
                     opaque.set_at((x, y), filler)
 
-        # Detect eye pixels on original colors BEFORE tinting.
         green_eyes: list[tuple[int, int]] = []
         red_eyes: list[tuple[int, int]] = []
         for y in range(h):
@@ -170,10 +238,7 @@ class PygameArenaWindow:
                 elif r > 90 and (r - g) > 25 and (r - b) > 18:
                     red_eyes.append((x, y))
 
-        # Tint castle toward terrain's purple-brown palette so it blends with
-        # the arena tiles instead of looking like a separate gray asset.
         tinted = pygame.Surface((w, h), pygame.SRCALPHA)
-        # Target hue matches terrain tiles (~325 deg purple-brown).
         tint_r, tint_g, tint_b = 82, 48, 66
         for y in range(h):
             for x in range(w):
@@ -181,15 +246,12 @@ class PygameArenaWindow:
                 if a == 0:
                     continue
                 luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
-                # Map: use original luma as intensity, replace color with
-                # terrain hue. Gamma curve lifts shadows for visible detail.
                 t = (luma / 160.0) ** 0.65
                 nr = min(255, int(tint_r * t * 1.8 + 12))
                 ng = min(255, int(tint_g * t * 1.8 + 8))
                 nb = min(255, int(tint_b * t * 1.8 + 10))
                 tinted.set_at((x, y), (nr, ng, nb, a))
 
-        # Paint eye pixels and add glow halos.
         for ex, ey in green_eyes:
             tinted.set_at((ex, ey), (34, 255, 85, 255))
         for ex, ey in red_eyes:
@@ -206,15 +268,11 @@ class PygameArenaWindow:
         return tinted
 
     def _remove_wall_backdrop(self, src: pygame.Surface) -> pygame.Surface:
-        """Remove flat background by color-distance from corner samples.
-
-        Keeps castle structures intact while turning backdrop fully transparent.
-        """
+        """Remove flat background by color-distance from corner samples."""
 
         w, h = src.get_size()
         out = src.copy()
 
-        # Estimate backdrop color from corners.
         corners = [
             src.get_at((0, 0)),
             src.get_at((w - 1, 0)),
@@ -225,8 +283,6 @@ class PygameArenaWindow:
         bg_g = sum(c.g for c in corners) // 4
         bg_b = sum(c.b for c in corners) // 4
 
-        # Tight threshold to avoid eating dark castle details.
-        # Use a hard cut (no feathered alpha) to prevent washed-out blending.
         hard_cut = 22
 
         for y in range(h):
@@ -242,7 +298,6 @@ class PygameArenaWindow:
                 else:
                     out.set_at((x, y), (c.r, c.g, c.b, 255))
 
-        # Trim transparent margins so castle fills width cleanly after scaling.
         rect = out.get_bounding_rect(min_alpha=8)
         if rect.width > 0 and rect.height > 0:
             trimmed = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
@@ -254,7 +309,7 @@ class PygameArenaWindow:
         """Build dark brick texture matching the provided reference style."""
 
         tex = pygame.Surface((TILE_SIZE, TILE_SIZE))
-        tex.fill((22, 22, 24))  # mortar / gaps
+        tex.fill((22, 22, 24))
 
         brick_h = max(8, TILE_SIZE // 5)
         brick_w = max(14, TILE_SIZE // 2)
@@ -334,9 +389,6 @@ class PygameArenaWindow:
             return None
         out = tex.copy().convert_alpha()
         w, h = out.get_size()
-        # Use chroma (max - min channel) to separate neutral-gray background
-        # from the purple/brown wall texture. Background chroma ~3-12,
-        # wall chroma ~24+. Threshold 15 sits cleanly in the gap.
         chroma_cutoff = 15
         for y in range(h):
             for x in range(w):
@@ -351,17 +403,13 @@ class PygameArenaWindow:
         return out
 
     def _normalize_tile_color(self, tex: pygame.Surface | None) -> pygame.Surface | None:
-        """Normalize tile colors so all tiles share a consistent palette.
-
-        Computes per-channel scale factors to match a target average RGB,
-        ensuring uniform color temperature across all terrain tiles.
-        """
+        """Normalize tile colors so all tiles share a consistent palette."""
         if tex is None:
             return None
         out = tex.copy().convert_alpha()
         w, h = out.get_size()
-        # Target: average of inner land's raw profile.
-        target_r, target_g, target_b = 80.0, 47.0, 64.0
+        # Shift island tiles to a darker swamp-green tone that matches the poison rocks.
+        target_r, target_g, target_b = 44.0, 86.0, 40.0
         r_sum, g_sum, b_sum, count = 0.0, 0.0, 0.0, 0
         for y in range(h):
             for x in range(w):
@@ -375,10 +423,9 @@ class PygameArenaWindow:
         if count == 0:
             return out
         avg_r, avg_g, avg_b = r_sum / count, g_sum / count, b_sum / count
-        # Per-channel scale, clamped to avoid extreme correction.
-        sr = max(0.85, min(1.2, target_r / avg_r)) if avg_r > 0 else 1.0
-        sg = max(0.85, min(1.2, target_g / avg_g)) if avg_g > 0 else 1.0
-        sb = max(0.85, min(1.2, target_b / avg_b)) if avg_b > 0 else 1.0
+        sr = max(0.60, min(1.60, target_r / avg_r)) if avg_r > 0 else 1.0
+        sg = max(0.60, min(1.60, target_g / avg_g)) if avg_g > 0 else 1.0
+        sb = max(0.60, min(1.60, target_b / avg_b)) if avg_b > 0 else 1.0
         for y in range(h):
             for x in range(w):
                 r, g, b, a = out.get_at((x, y))
@@ -392,8 +439,28 @@ class PygameArenaWindow:
                 ))
         return out
 
+    # ------------------------------------------------------------------
+    # Poison (lava) frame loading
+    # ------------------------------------------------------------------
+
+    def _apply_poison_filter(self, surf: pygame.Surface) -> pygame.Surface:
+        """Recolor lava pixels to toxic green poison palette."""
+        out = surf.copy().convert_alpha()
+        w, h = out.get_size()
+        for py in range(h):
+            for px in range(w):
+                r, g, b, a = out.get_at((px, py))
+                if a == 0:
+                    continue
+                luma = r * 0.6 + g * 0.3 + b * 0.1
+                nr = max(0, min(255, int(luma * 0.08)))
+                ng = max(0, min(255, int(luma * 0.90)))
+                nb = max(0, min(255, int(luma * 0.18)))
+                out.set_at((px, py), (nr, ng, nb, a))
+        return out
+
     def _load_lava_frames(self) -> list[pygame.Surface]:
-        """Load and scale animated lava frames from terrain assets."""
+        """Load, scale, and poison-filter animated lava frames."""
 
         frames: list[pygame.Surface] = []
         for idx in range(1, 8):
@@ -402,28 +469,27 @@ class PygameArenaWindow:
                 continue
             try:
                 src = pygame.image.load(str(path)).convert_alpha()
-                # Crop tighter into the DOWNMOST lava region (no synthetic filler).
                 content = src.get_bounding_rect(min_alpha=8)
                 if content.width > 0 and content.height > 0:
                     base_side = min(content.width, content.height)
-                    side = max(16, int(base_side * 0.32))  # tiny bit more zoom-in
+                    side = max(16, int(base_side * 0.32))
                     cx = content.x + (content.width - side) // 2
-                    cy = content.y + (content.height - side)  # downmost focus
+                    cy = content.y + (content.height - side)
                     square = src.subsurface(pygame.Rect(cx, cy, side, side)).copy()
                 else:
-                    # Fallback: downmost square crop from full image.
                     w, h = src.get_size()
                     side = max(16, int(min(w, h) * 0.32))
                     cx = (w - side) // 2
                     cy = h - side
                     square = src.subsurface(pygame.Rect(cx, cy, side, side)).copy()
-                frames.append(pygame.transform.smoothscale(square, (TILE_SIZE, TILE_SIZE)))
+                scaled = pygame.transform.smoothscale(square, (TILE_SIZE, TILE_SIZE))
+                frames.append(self._apply_poison_filter(scaled))
             except pygame.error:
                 continue
         return frames
 
     def _load_lava_rock_frames(self) -> list[pygame.Surface]:
-        """Load and scale animated lava rock frames."""
+        """Load, scale, and poison-filter animated lava rock frames."""
 
         frames: list[pygame.Surface] = []
         rock_size = max(14, int(TILE_SIZE * 0.62))
@@ -438,10 +504,15 @@ class PygameArenaWindow:
                     rock = src.subsurface(content).copy()
                 else:
                     rock = src.copy()
-                frames.append(pygame.transform.smoothscale(rock, (rock_size, rock_size)))
+                scaled = pygame.transform.smoothscale(rock, (rock_size, rock_size))
+                frames.append(self._apply_poison_filter(scaled))
             except pygame.error:
                 continue
         return frames
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
     def run(self) -> bool:
         """Run loop and render only arena environment."""
@@ -462,6 +533,10 @@ class PygameArenaWindow:
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 self.running = False
 
+    # ------------------------------------------------------------------
+    # Tile drawing
+    # ------------------------------------------------------------------
+
     def _draw_tile(
         self,
         x: int,
@@ -474,7 +549,6 @@ class PygameArenaWindow:
     ) -> None:
         """Draw one seamless tile with soft lighting, depth, and ultra-subtle texture."""
 
-        # Unified castle-themed stone texture for all tiles (single biome).
         fill = (58, 58, 72)
 
         rect = pygame.Rect(x, y, TILE_SIZE, TILE_SIZE)
@@ -510,8 +584,12 @@ class PygameArenaWindow:
         """Bottom strip removed: grid remains the bottommost visual element."""
         return
 
+    # ------------------------------------------------------------------
+    # Poison pool (lava) drawing
+    # ------------------------------------------------------------------
+
     def _draw_lava(self) -> None:
-        """Draw animated lava across arena background; tiles render on top."""
+        """Draw animated poison pool across arena background; tiles render on top."""
 
         if not self.lava_frames:
             return
@@ -519,20 +597,18 @@ class PygameArenaWindow:
         frame = self.lava_frames[(pygame.time.get_ticks() // 120) % len(self.lava_frames)]
         tile = TILE_SIZE
 
-        # Fill the whole scene with lava animation; grid/castle paint over it.
         for y in range(0, self.screen.get_height(), tile):
             for x in range(0, self.screen.get_width(), tile):
                 self.screen.blit(frame, (x, y))
 
     def _draw_lava_rocks(self) -> None:
-        """Draw many animated lava rocks in lava zones, excluding castle vicinity."""
+        """Draw animated poison rocks in lava zones, excluding grid vicinity."""
 
         if not self.lava_rock_frames:
             return
         frame = self.lava_rock_frames[(pygame.time.get_ticks() // 110) % len(self.lava_rock_frames)]
         rw, rh = frame.get_size()
 
-        # Exclude area close to castle.
         castle_layout = self._compute_castle_layout()
         if castle_layout is None:
             castle_exclusion = pygame.Rect(0, 0, 0, 0)
@@ -540,14 +616,12 @@ class PygameArenaWindow:
             cx, cy, cw, ch = castle_layout
             castle_exclusion = pygame.Rect(cx, cy, cw, ch).inflate(TILE_SIZE * 3, TILE_SIZE * 2)
 
-        # Grid area is not lava-visible; skip it.
         grid_rect = pygame.Rect(self.arena_x, self.arena_y - (SIDE_EXTENSION_ROWS * TILE_SIZE), self.arena_w, self.arena_h + (SIDE_EXTENSION_ROWS * TILE_SIZE))
 
         step_x = max(28, int(TILE_SIZE * 1.05))
         step_y = max(24, int(TILE_SIZE * 0.95))
         for y in range(0, self.screen.get_height(), step_y):
             for x in range(0, self.screen.get_width(), step_x):
-                # Deterministic density filter to avoid uniform stamping.
                 gate = ((x // step_x) * 92821) ^ ((y // step_y) * 68917)
                 if (gate % 5) != 0:
                     continue
@@ -564,7 +638,7 @@ class PygameArenaWindow:
                 self.screen.blit(frame, (px, py))
 
     def _compute_castle_layout(self) -> tuple[int, int, int, int] | None:
-        """Compute castle (x, y, width, height) with current sizing rules."""
+        """Compute castle (x, y, width, height) — kept for rock exclusion zone."""
 
         if self.castle_wall is None:
             return None
@@ -594,21 +668,657 @@ class PygameArenaWindow:
             y = 5
         return (x, y, scaled_w, scaled_h)
 
-    def _draw_castles(self) -> None:
-        """Draw one unified castle wall spanning full arena width above the grid."""
+    # ------------------------------------------------------------------
+    # Giant arch serpent (replaces castle above the grid)
+    # ------------------------------------------------------------------
 
-        layout = self._compute_castle_layout()
-        if layout is None:
+    # ---- throw state machine helpers (big serpent) -------------------
+
+    def _update_throw_state(self, ticks: int) -> None:
+        """Advance the big serpent's throw state machine (idle/wind_up/throw/recover)."""
+
+        state = self._throw_state
+        elapsed = ticks - self._throw_state_start
+
+        if state == "idle":
+            if ticks >= self._next_throw_time:
+                self._throw_state = "wind_up"
+                self._throw_state_start = ticks
+                self._throw_blob_spawned = False
+        elif state == "wind_up":
+            if elapsed >= 650:  # 0.65s rear-up
+                self._throw_state = "throw"
+                self._throw_state_start = ticks
+        elif state == "throw":
+            if elapsed >= 320:  # 0.32s strike
+                self._throw_state = "recover"
+                self._throw_state_start = ticks
+        elif state == "recover":
+            if elapsed >= 600:  # 0.6s settle
+                self._throw_state = "idle"
+                self._throw_state_start = ticks
+                self._next_throw_time = ticks + random.randint(4400, 5600)
+
+    def _throw_progress(self, ticks: int) -> float:
+        """Progress 0..1 within the current throw state."""
+
+        elapsed = ticks - self._throw_state_start
+        state = self._throw_state
+        if state == "wind_up":
+            return min(1.0, elapsed / 650.0)
+        if state == "throw":
+            return min(1.0, elapsed / 320.0)
+        if state == "recover":
+            return min(1.0, elapsed / 600.0)
+        return 0.0
+
+    def _spawn_blob_from_head(self, head_pos: tuple[float, float], head_dir: tuple[float, float]) -> None:
+        """Spawn a poison blob projectile thrown from the serpent's head."""
+
+        hx, hy = head_pos
+        # Aim at a random arena tile (avoid the very edges).
+        target_col = random.uniform(2.0, GRID_COLS - 3.0)
+        target_row = random.uniform(1.5, GRID_ROWS - 1.5)
+        target_x = self.arena_x + target_col * TILE_SIZE
+        target_y = self.arena_y + target_row * TILE_SIZE
+
+        # Compute initial velocity for a parabolic arc to that target.
+        flight_time = random.uniform(0.95, 1.25)
+        gravity = 780.0
+        vx = (target_x - hx) / flight_time
+        vy = (target_y - hy - 0.5 * gravity * flight_time * flight_time) / flight_time
+
+        # Add a small launch-impulse along the head's strike direction.
+        dx, dy = head_dir
+        vx += dx * 60.0
+        vy += dy * 40.0
+
+        self._poison_blobs.append({
+            "x": float(hx),
+            "y": float(hy),
+            "vx": float(vx),
+            "vy": float(vy),
+            "target_y": float(target_y),
+            "wobble": random.uniform(0.0, math.tau),
+            "alive": True,
+            "splat_at": 0,
+            "splat_x": 0.0,
+            "splat_y": 0.0,
+        })
+
+    # ---- big serpent rendering ---------------------------------------
+
+    def _draw_arena_serpent(self) -> None:
+        """Draw the giant decorative serpent fully inside the center gap.
+
+        The serpent is the arena's "main character": it slithers in idle motion
+        and periodically rears its head up like an anaconda before snapping
+        forward to throw a poison-coated blob into the arena.
+        """
+
+        ticks = pygame.time.get_ticks()
+        phase = ticks / 900.0
+
+        # Advance throw state machine before sampling motion modifiers.
+        self._update_throw_state(ticks)
+        state = self._throw_state
+        sp = self._throw_progress(ticks)
+
+        # Compute head_y_offset (positive = head goes DOWN, negative = UP)
+        # and forward_extend (positive = head reaches further along its trail).
+        y_offset = 0.0
+        forward_extend = 0.0
+        if state == "wind_up":
+            eased = 1 - (1 - sp) ** 2
+            y_offset = -78.0 * eased  # rear up like an anaconda
+            forward_extend = -8.0 * eased  # slight pull back
+        elif state == "throw":
+            # Snap from -78 (high) to +24 (struck low), then settle.
+            eased = 1 - (1 - sp) ** 3
+            y_offset = -78.0 + eased * 102.0
+            forward_extend = 34.0 * math.sin(sp * math.pi)
+        elif state == "recover":
+            # Glide back from +24 to 0.
+            eased = 1 - (1 - sp) ** 2
+            y_offset = 24.0 * (1.0 - eased)
+            forward_extend = -6.0 * math.sin(sp * math.pi)
+
+        ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
+        gap_x = self.arena_x + SIDE_EXTENSION_TILES * TILE_SIZE + 26
+        gap_w = self.arena_w - (SIDE_EXTENSION_TILES * 2 * TILE_SIZE) - 52
+        gap_y = self.arena_y - ext_h + 16
+        gap_h = ext_h - 30
+        center_y = gap_y + gap_h * 0.5
+
+        num_seg = 70
+        pts: list[tuple[float, float]] = []
+        min_x = gap_x + 14
+        max_x = gap_x + gap_w - 14
+        # Allow the head to rise above the gap during wind-up and dip below
+        # the grid line during the strike.
+        y_min_clamp = gap_y - 90
+        y_max_clamp = gap_y + gap_h + 18
+
+        for i in range(num_seg):
+            t = i / (num_seg - 1)
+            base_x = gap_x + gap_w * (0.08 + 0.84 * t)
+            twist_x = math.sin(t * math.tau * 2.5 + phase * 0.8) * 18
+            y = (
+                center_y
+                + math.sin(t * math.tau * 1.35 + phase) * 34
+                + math.sin(t * math.tau * 4.8 + phase * 1.7) * 10
+            )
+            x = base_x + twist_x
+
+            # Apply throw-induced offsets to the head section (last ~45%),
+            # quadratically weighted so only the head segments react.
+            head_weight = max(0.0, (t - 0.55) / 0.45)
+            hw_q = head_weight * head_weight
+            y += y_offset * hw_q
+            x += forward_extend * hw_q
+
+            pts.append((min(max(min_x, x), max_x + 30), min(max(y_min_clamp, y), y_max_clamp)))
+
+        # Body segments rendered tail->head so the head sits on top.
+        for i in range(num_seg):
+            t = i / (num_seg - 1)
+            px, py = int(pts[i][0]), int(pts[i][1])
+            body = math.sin(math.pi * t)
+            # Subtle radius "breathing" makes the snake feel alive.
+            breath = 1.0 + 0.04 * math.sin(phase * 2.2 + t * 6.0)
+            r = max(4, int((7 + 9 * (0.35 + 0.65 * body)) * breath))
+
+            pygame.draw.circle(self.screen, (16, 58, 10), (px, py), r + 2)
+            pygame.draw.circle(self.screen, (27, 94, 18), (px, py), r + 1)
+            pygame.draw.circle(self.screen, (40, 132, 28), (px, py), r)
+            pygame.draw.circle(self.screen, (60, 172, 42), (px, py + max(1, r // 4)), max(2, r - 5))
+
+            if i % 4 == 0 and 1 <= i < num_seg - 1:
+                tx = pts[i + 1][0] - pts[i - 1][0]
+                ty = pts[i + 1][1] - pts[i - 1][1]
+                norm = max(0.01, (tx * tx + ty * ty) ** 0.5)
+                perp_x, perp_y = -ty / norm, tx / norm
+                if perp_y > 0:
+                    perp_x, perp_y = -perp_x, -perp_y
+                sx = int(px + perp_x * (r - 1))
+                sy = int(py + perp_y * (r - 1))
+                ex = int(px + perp_x * (r + 4))
+                ey = int(py + perp_y * (r + 4))
+                pygame.draw.line(self.screen, (12, 44, 8), (sx, sy), (ex, ey), 2)
+
+        # Head & facial features.
+        hx, hy = int(pts[-1][0]), int(pts[-1][1])
+        dir_x = pts[-1][0] - pts[-2][0]
+        dir_y = pts[-1][1] - pts[-2][1]
+        norm = max(0.01, (dir_x * dir_x + dir_y * dir_y) ** 0.5)
+        dir_x /= norm
+        dir_y /= norm
+        perp_x, perp_y = -dir_y, dir_x
+
+        # Head grows slightly when rearing up to add menace.
+        head_pulse = 1.0
+        if state == "wind_up":
+            head_pulse = 1.0 + 0.18 * sp
+        elif state == "throw":
+            head_pulse = 1.18 - 0.22 * sp  # shrinks a touch on strike
+        elif state == "recover":
+            head_pulse = 0.96 + 0.04 * sp
+        head_r = max(12, int(16 * head_pulse))
+
+        pygame.draw.circle(self.screen, (14, 50, 8), (hx, hy), head_r + 4)
+        pygame.draw.circle(self.screen, (24, 84, 16), (hx, hy), head_r + 1)
+        pygame.draw.circle(self.screen, (38, 124, 26), (hx, hy), head_r)
+
+        # Jaw - extra bulge near the lower head edge for character.
+        jaw_x = int(hx + perp_x * (head_r * 0.45) + dir_x * 4)
+        jaw_y = int(hy + perp_y * (head_r * 0.45) + dir_y * 4)
+        pygame.draw.circle(self.screen, (32, 102, 22), (jaw_x, jaw_y), max(4, head_r - 6))
+
+        snout_x = int(hx + dir_x * (head_r - 3))
+        snout_y = int(hy + dir_y * (head_r - 3))
+        pygame.draw.circle(self.screen, (34, 108, 24), (snout_x, snout_y), max(4, head_r - 5))
+
+        # Nostrils.
+        for sign in (-1, 1):
+            nx = int(snout_x + perp_x * sign * 3 + dir_x * 4)
+            ny = int(snout_y + perp_y * sign * 3 + dir_y * 4)
+            pygame.draw.circle(self.screen, (12, 38, 8), (nx, ny), 1)
+
+        # Eyes - brighter when rearing/striking.
+        eye_intensity = 1.0
+        if state in ("wind_up", "throw"):
+            eye_intensity = 1.4
+        for sign in (-1, 1):
+            ex = int(hx + perp_x * sign * (head_r * 0.55) + dir_x * 5)
+            ey = int(hy + perp_y * sign * (head_r * 0.55) + dir_y * 5)
+            glow_s = pygame.Surface((40, 40), pygame.SRCALPHA)
+            pygame.draw.circle(glow_s, (0, 220, 60, int(60 * eye_intensity)), (20, 20), 14)
+            pygame.draw.circle(glow_s, (0, 255, 90, int(110 * eye_intensity)), (20, 20), 8)
+            self.screen.blit(glow_s, (ex - 20, ey - 20))
+            pygame.draw.circle(self.screen, (0, 255, 100), (ex, ey), 5)
+            # Slit pupil aligned with movement direction.
+            pup_a = (int(ex - dir_x * 1.5), int(ey - dir_y * 1.5))
+            pup_b = (int(ex + dir_x * 1.5), int(ey + dir_y * 1.5))
+            pygame.draw.line(self.screen, (0, 0, 0), pup_a, pup_b, 2)
+
+        # Crown spikes.
+        for st in (-0.26, 0.0, 0.26):
+            bx = int(hx + perp_x * st * 16 - dir_x * 8)
+            by = int(hy + perp_y * st * 16 - dir_y * 8)
+            tip_x = int(bx - dir_x * 10)
+            tip_y = int(by - dir_y * 10)
+            pygame.draw.line(self.screen, (50, 180, 35), (bx, by), (tip_x, tip_y), 2)
+            pygame.draw.circle(self.screen, (88, 250, 55), (tip_x, tip_y), 3)
+
+        # Tongue - flickers more aggressively while idle.
+        tongue_visible = math.sin(ticks / 170.0) > 0.52 or state == "wind_up"
+        if state == "throw":
+            tongue_visible = False  # mouth open / striking
+        if tongue_visible:
+            base_x = int(snout_x + dir_x * 7)
+            base_y = int(snout_y + dir_y * 7)
+            mid_x = int(base_x + dir_x * 10)
+            mid_y = int(base_y + dir_y * 10)
+            pygame.draw.line(self.screen, (212, 28, 28), (base_x, base_y), (mid_x, mid_y), 2)
+            for sign in (-1, 1):
+                fx = int(mid_x + (dir_x * 6 + perp_x * sign * 5))
+                fy = int(mid_y + (dir_y * 6 + perp_y * sign * 5))
+                pygame.draw.line(self.screen, (212, 28, 28), (mid_x, mid_y), (fx, fy), 2)
+
+        # Open jaw / charge-up glow inside the mouth during wind-up & throw.
+        if state in ("wind_up", "throw"):
+            charge_t = sp if state == "wind_up" else (1.0 - sp)
+            mouth_x = int(snout_x + dir_x * 6)
+            mouth_y = int(snout_y + dir_y * 6)
+            mouth_r = max(3, int(7 + 4 * charge_t))
+            charge = pygame.Surface((mouth_r * 4 + 4, mouth_r * 4 + 4), pygame.SRCALPHA)
+            cc = mouth_r * 2 + 2
+            pygame.draw.circle(charge, (60, 220, 40, int(120 * charge_t)), (cc, cc), mouth_r + 4)
+            pygame.draw.circle(charge, (160, 255, 90, int(200 * charge_t)), (cc, cc), mouth_r)
+            pygame.draw.circle(charge, (240, 255, 200, int(240 * charge_t)), (cc, cc), max(1, mouth_r - 3))
+            self.screen.blit(charge, (mouth_x - cc, mouth_y - cc))
+
+        # Spawn the blob mid-throw, exactly once per cycle.
+        if state == "throw" and not self._throw_blob_spawned and sp >= 0.42:
+            self._spawn_blob_from_head((float(hx), float(hy)), (dir_x, dir_y))
+            self._throw_blob_spawned = True
+
+        # Tail tip.
+        tx, ty = int(pts[0][0]), int(pts[0][1])
+        pygame.draw.circle(self.screen, (20, 70, 12), (tx, ty), 5)
+        pygame.draw.circle(self.screen, (38, 118, 26), (tx, ty), 3)
+
+        # Poison drip particles trailing off the body.
+        max_drop = max(22, int(gap_h * 0.3))
+        for drip in self._poison_drips:
+            t = max(0.0, min(1.0, float(drip["t"])))
+            idx = min(num_seg - 2, max(0, int(t * (num_seg - 1))))
+            frac = t * (num_seg - 1) - idx
+            bx = pts[idx][0] * (1.0 - frac) + pts[idx + 1][0] * frac
+            by = pts[idx][1] * (1.0 - frac) + pts[idx + 1][1] * frac
+
+            drip["y_offset"] += drip["vy"]
+            if drip["y_offset"] > max_drop:
+                drip["y_offset"] = 0.0
+                drip["alpha"] = random.randint(130, 220)
+
+            px = int(bx)
+            py = int(by + 8 + drip["y_offset"])
+            alpha = max(0, drip["alpha"] - int(drip["y_offset"] * 3.0))
+            if alpha > 12 and gap_y <= py <= gap_y + gap_h + 18:
+                sz = drip["size"]
+                ds = pygame.Surface((sz * 4 + 2, sz * 4 + 2), pygame.SRCALPHA)
+                pygame.draw.circle(ds, (80, 255, 40, alpha), (sz * 2 + 1, sz * 2 + 1), sz)
+                self.screen.blit(ds, (px - sz * 2 - 1, py - sz * 2 - 1))
+
+    # ---- poison blobs (projectiles) ----------------------------------
+
+    def _draw_blobs(self) -> None:
+        """Update and render poison blob projectiles (and their splats)."""
+
+        if not self._poison_blobs:
             return
-        x, y, scaled_w, scaled_h = layout
-        wall = pygame.transform.smoothscale(self.castle_wall, (scaled_w, scaled_h))
-        self.screen.blit(wall, (x, y))
+
+        ticks = pygame.time.get_ticks()
+        dt = self._step_dt
+        gravity = 780.0
+
+        survivors: list[dict] = []
+        for blob in self._poison_blobs:
+            if not blob["alive"]:
+                # Splat fades out over ~450 ms.
+                age = ticks - blob["splat_at"]
+                if age < 450:
+                    self._draw_splat(blob, age)
+                    survivors.append(blob)
+                continue
+
+            blob["vy"] += gravity * dt
+            blob["x"] += blob["vx"] * dt
+            blob["y"] += blob["vy"] * dt
+
+            # Land when the blob reaches (or passes) its intended tile y.
+            if blob["y"] >= blob["target_y"]:
+                blob["alive"] = False
+                blob["splat_at"] = ticks
+                blob["splat_x"] = blob["x"]
+                blob["splat_y"] = blob["target_y"]
+                survivors.append(blob)
+                continue
+            if blob["x"] < -60 or blob["x"] > WINDOW_WIDTH + 60 or blob["y"] > WINDOW_HEIGHT + 60:
+                continue
+
+            bx, by = int(blob["x"]), int(blob["y"])
+            wob = math.sin(ticks / 80.0 + blob["wobble"])
+            r = 11 + int(2 * wob)
+
+            # Trailing droplets (drawn behind the blob).
+            for ti in range(3):
+                trail_dt = -0.045 * (ti + 1)
+                tx_ = blob["x"] + blob["vx"] * trail_dt
+                ty_ = blob["y"] + blob["vy"] * trail_dt - 0.5 * gravity * trail_dt * trail_dt
+                tr = max(2, r - 3 - ti * 2)
+                ta = 170 - ti * 50
+                ts = pygame.Surface((tr * 4 + 2, tr * 4 + 2), pygame.SRCALPHA)
+                tc = tr * 2 + 1
+                pygame.draw.circle(ts, (60, 200, 40, ta), (tc, tc), tr)
+                self.screen.blit(ts, (int(tx_) - tc, int(ty_) - tc))
+
+            # Outer glow.
+            gs = pygame.Surface((r * 4 + 8, r * 4 + 8), pygame.SRCALPHA)
+            gc = r * 2 + 4
+            pygame.draw.circle(gs, (60, 220, 40, 70),  (gc, gc), r + 7)
+            pygame.draw.circle(gs, (90, 255, 60, 110), (gc, gc), r + 3)
+            self.screen.blit(gs, (bx - gc, by - gc))
+
+            # Body layers.
+            pygame.draw.circle(self.screen, (16, 58, 10),    (bx, by),         r + 2)
+            pygame.draw.circle(self.screen, (40, 138, 28),   (bx, by),         r)
+            pygame.draw.circle(self.screen, (110, 220, 70),  (bx - 2, by - 2), max(2, r - 4))
+            pygame.draw.circle(self.screen, (220, 255, 200), (bx - 3, by - 3), max(1, r - 8))
+
+            survivors.append(blob)
+
+        self._poison_blobs = survivors
+
+    def _draw_splat(self, blob: dict, age_ms: int) -> None:
+        """Draw a poison splat that expands and fades on impact."""
+
+        sx = int(blob["splat_x"])
+        sy = int(blob["splat_y"])
+        age_t = age_ms / 450.0  # 0..1
+        radius = int(14 + 18 * age_t)
+        alpha = max(0, int(220 * (1.0 - age_t)))
+        s = pygame.Surface((radius * 2 + 6, radius * 2 + 6), pygame.SRCALPHA)
+        cc = radius + 3
+        pygame.draw.circle(s, (40, 200, 40, alpha // 2), (cc, cc), radius)
+        pygame.draw.circle(s, (90, 255, 60, alpha), (cc, cc), max(2, radius - 5))
+        pygame.draw.circle(s, (200, 255, 180, alpha // 3), (cc, cc), max(1, radius - 12))
+        self.screen.blit(s, (sx - cc, sy - cc))
+
+    # ---- toxic-spike obstacles ---------------------------------------
+
+    def _draw_obstacles(self) -> None:
+        """Draw toxic mushroom clusters on obstacle tiles.
+
+        Clusters of 3 bioluminescent mushrooms mark tiles the player must
+        avoid. They glow, have spots, and are clearly thematic.
+        """
+
+        ticks = pygame.time.get_ticks()
+
+        for ob in self.obstacles:
+            # Tile bottom-center — mushrooms grow upward from here.
+            cx = self.arena_x + ob["col"] * TILE_SIZE + TILE_SIZE // 2
+            cy = self.arena_y + ob["row"] * TILE_SIZE + TILE_SIZE - 4
+            glow = 0.55 + 0.45 * math.sin(ticks / 600.0 + ob["phase"])
+
+            # Wide bioluminescent aura below the cluster.
+            aura_r = int(30 + 5 * glow)
+            aura = pygame.Surface((aura_r * 2 + 4, aura_r * 2 + 4), pygame.SRCALPHA)
+            pygame.draw.circle(aura, (40, 200, 20, int(50 * glow)), (aura_r + 2, aura_r + 2), aura_r)
+            pygame.draw.circle(aura, (70, 245, 40, int(85 * glow)), (aura_r + 2, aura_r + 2), aura_r - 10)
+            self.screen.blit(aura, (cx - aura_r - 2, cy - aura_r - 2))
+
+            # Three mushrooms per cluster with a deterministic RNG so each
+            # obstacle has a unique but stable look.
+            rng = random.Random(ob["col"] * 101 + ob["row"] * 97)
+            configs = [
+                (cx + rng.randint(-11, 11), cy,                         rng.uniform(0.75, 1.0)),
+                (cx + rng.randint(-18, -7), cy + rng.randint(-3, 3),    rng.uniform(0.52, 0.72)),
+                (cx + rng.randint(7,  18),  cy + rng.randint(-3, 3),    rng.uniform(0.55, 0.75)),
+            ]
+            for mx, my, sc in configs:
+                self._draw_one_mushroom(int(mx), int(my), sc, glow, rng)
+
+    def _draw_one_mushroom(self, mx: int, my: int, scale: float, glow: float, rng: random.Random) -> None:
+        """Draw one toxic mushroom anchored at (mx, my) — a front-facing sprite."""
+
+        cap_rx   = max(5, int(17 * scale))
+        cap_ry   = max(3, int(10 * scale))
+        stem_h   = max(4, int(20 * scale))
+        stem_wt  = max(1, int(cap_rx * 0.30))  # top width
+        stem_wb  = max(2, int(cap_rx * 0.42))  # bottom width
+
+        cap_cy   = my - stem_h - cap_ry // 2  # y of cap centre
+
+        # Ground shadow.
+        shad = pygame.Surface((cap_rx * 2 + 10, 8), pygame.SRCALPHA)
+        pygame.draw.ellipse(shad, (0, 18, 0, 130), shad.get_rect().inflate(-4, -2))
+        self.screen.blit(shad, (mx - cap_rx - 5, my - 4))
+
+        # Stem.
+        stem_pts = [
+            (mx - stem_wt, my - stem_h),
+            (mx + stem_wt, my - stem_h),
+            (mx + stem_wb, my),
+            (mx - stem_wb, my),
+        ]
+        pygame.draw.polygon(self.screen, (62, 118, 38), stem_pts)
+        pygame.draw.line(self.screen, (100, 168, 58),
+                         (mx, my - stem_h + 2), (mx, my - 2), max(1, stem_wt - 1))
+
+        # Underside of cap (slightly lighter, flat half-oval).
+        pygame.draw.ellipse(self.screen, (48, 112, 26),
+                            pygame.Rect(mx - cap_rx, cap_cy + cap_ry // 2,
+                                        cap_rx * 2, max(3, cap_ry // 2)))
+
+        # Cap body.
+        cap_rect = pygame.Rect(mx - cap_rx, cap_cy - cap_ry, cap_rx * 2, cap_ry * 2 + cap_ry // 2)
+        pygame.draw.ellipse(self.screen, (20, 74, 10), cap_rect)
+        pygame.draw.ellipse(self.screen, (36, 118, 18), cap_rect.inflate(-4, -3))
+
+        # Cap top highlight.
+        pygame.draw.ellipse(self.screen, (72, 188, 36),
+                            pygame.Rect(mx - cap_rx // 2, cap_cy - cap_ry + 2, cap_rx, cap_ry - 2))
+
+        # Spots (deterministic per mushroom via shared rng).
+        for _ in range(rng.randint(2, 5)):
+            sx = mx + rng.randint(-cap_rx + 3, cap_rx - 3)
+            sy = cap_cy - cap_ry // 2 + rng.randint(-cap_ry // 2, cap_ry // 4)
+            sr = rng.randint(1, max(2, int(3 * scale)))
+            pygame.draw.circle(self.screen, (185, 255, 75), (sx, sy), sr)
+            pygame.draw.circle(self.screen, (235, 255, 190), (sx, sy), max(1, sr - 1))
+
+        # Glowing cap aura.
+        aura_w = cap_rx * 2 + 14
+        aura_h = cap_ry * 2 + 8
+        cap_aura = pygame.Surface((aura_w, aura_h), pygame.SRCALPHA)
+        pygame.draw.ellipse(cap_aura, (50, 220, 28, int(60 * glow)), cap_aura.get_rect())
+        self.screen.blit(cap_aura, (mx - aura_w // 2, cap_cy - cap_ry - 4))
+
+    # ------------------------------------------------------------------
+    # Small pool snakes
+    # ------------------------------------------------------------------
+
+    def _draw_snakes(self) -> None:
+        """Update and draw pool snakes using full 2-D agent motion.
+
+        Each snake has a heading angle that drifts randomly and is repelled
+        from the grid boundary and screen edges.  Body segments follow the
+        head via a position-history deque, giving completely natural trailing
+        motion regardless of how the head turns.
+        """
+
+        ticks = pygame.time.get_ticks()
+        dt = self._step_dt
+
+        # Grid exclusion zone (snakes get repelled from this rectangle).
+        g_left  = float(self.arena_x - 5)
+        g_right = float(self.arena_x + self.arena_w + 5)
+        g_top   = float(self.arena_y - SIDE_EXTENSION_ROWS * TILE_SIZE - 5)
+        g_bot   = float(self.arena_y + self.arena_h + 5)
+        GMARGIN = 65.0
+        SM      = 18.0   # screen-edge repulsion margin
+
+        for snake in self.snakes:
+            x, y     = snake["x"], snake["y"]
+            sc       = snake["scale"]
+            speed    = snake["speed"]
+
+            # ---- random turn target ------------------------------------------
+            snake["turn_timer"] -= dt
+            if snake["turn_timer"] <= 0:
+                snake["target_angle"] += random.uniform(-math.pi * 0.6, math.pi * 0.6)
+                snake["turn_timer"] = random.uniform(1.0, 2.6)
+
+            # ---- repulsion forces --------------------------------------------
+            rx, ry = 0.0, 0.0
+
+            # Grid repulsion: vector points from nearest grid surface toward snake.
+            if g_left <= x <= g_right and g_top <= y <= g_bot:
+                # Inside grid — emergency eject toward nearest wall.
+                d_l = x - g_left;  d_r = g_right - x
+                d_t = y - g_top;   d_b = g_bot   - y
+                m   = min(d_l, d_r, d_t, d_b)
+                rx  = -8.0 if m == d_l else (8.0 if m == d_r else 0.0)
+                ry  = -8.0 if m == d_t else (8.0 if m == d_b else 0.0)
+            else:
+                nx   = max(g_left, min(g_right, x))
+                ny   = max(g_top,  min(g_bot,   y))
+                dvx, dvy = x - nx, y - ny
+                dist = max(0.5, (dvx * dvx + dvy * dvy) ** 0.5)
+                if dist < GMARGIN:
+                    strength = (1.0 - dist / GMARGIN) ** 2 * 5.5
+                    rx += (dvx / dist) * strength
+                    ry += (dvy / dist) * strength
+
+            # Screen-edge repulsion.
+            if   x < SM:               rx += (SM - x) / SM * 5.0
+            elif x > WINDOW_WIDTH - SM: rx -= (x - (WINDOW_WIDTH  - SM)) / SM * 5.0
+            if   y < SM:               ry += (SM - y) / SM * 5.0
+            elif y > WINDOW_HEIGHT- SM: ry -= (y - (WINDOW_HEIGHT - SM)) / SM * 5.0
+
+            if rx != 0.0 or ry != 0.0:
+                repel_angle = math.atan2(ry, rx)
+                repel_str   = (rx * rx + ry * ry) ** 0.5
+                blend = min(1.0, repel_str / 3.5)
+                snake["target_angle"] = (repel_angle
+                                         + (1.0 - blend) * random.uniform(-0.25, 0.25))
+
+            # ---- smooth angle rotation --------------------------------------
+            da = snake["target_angle"] - snake["angle"]
+            while da >  math.pi: da -= math.tau
+            while da < -math.pi: da += math.tau
+            turn_max = snake["turn_rate"] * dt
+            snake["angle"] += max(-turn_max, min(turn_max, da))
+
+            # ---- move head --------------------------------------------------
+            spd_mod = 1.0 + 0.14 * math.sin(ticks / 1800.0 + snake["phase"])
+            snake["x"] += math.cos(snake["angle"]) * speed * spd_mod * dt
+            snake["y"] += math.sin(snake["angle"]) * speed * spd_mod * dt
+
+            # ---- screen wrap (reset history to avoid visual jump) -----------
+            WRAP = 85.0
+            if snake["x"] < -WRAP or snake["x"] > WINDOW_WIDTH + WRAP or \
+               snake["y"] < -WRAP or snake["y"] > WINDOW_HEIGHT + WRAP:
+                snake["x"] = max(-WRAP + 1, min(WINDOW_WIDTH + WRAP - 1, snake["x"]))
+                snake["y"] = max(-WRAP + 1, min(WINDOW_HEIGHT + WRAP - 1, snake["y"]))
+                # Pick a re-entry angle that points back toward the poison zone.
+                cx_mid = WINDOW_WIDTH  / 2
+                cy_mid = WINDOW_HEIGHT / 2
+                snake["angle"] = math.atan2(cy_mid - snake["y"], cx_mid - snake["x"])
+                snake["target_angle"] = snake["angle"]
+                snake["history"] = deque([(snake["x"], snake["y"])] * 300, maxlen=300)
+
+            # ---- update position history ------------------------------------
+            snake["history"].appendleft((snake["x"], snake["y"]))
+
+            # ---- build segment positions from history -----------------------
+            length = snake["length"]
+            # How many history frames between adjacent segments.
+            stride = max(1, int(11.0 * sc * TARGET_FPS / speed))
+            segments: list[tuple[float, float]] = [
+                snake["history"][min(len(snake["history"]) - 1, i * stride)]
+                for i in range(length)
+            ]
+
+            # Skip drawing if fully off-screen.
+            if not any(-50 < sx < WINDOW_WIDTH + 50 and -50 < sy < WINDOW_HEIGHT + 50
+                       for sx, sy in segments):
+                continue
+
+            # ---- draw body (tail→head so head is on top) --------------------
+            for i in range(length - 1, -1, -1):
+                bx, by = int(segments[i][0]), int(segments[i][1])
+                taper  = 0.45 + 0.55 * (1.0 - i / length)
+                r      = max(3, int((5 + 6 * taper) * sc))
+                pygame.draw.circle(self.screen, (14, 54,  8),  (bx, by), r + 2)
+                pygame.draw.circle(self.screen, (26, 90, 16),  (bx, by), r + 1)
+                pygame.draw.circle(self.screen, (42, 138, 28), (bx, by), r)
+                if i < length * 3 // 4:
+                    pygame.draw.circle(self.screen, (60, 174, 42),
+                                       (bx, by + max(1, r // 4)), max(1, r - 3))
+
+            # ---- head -------------------------------------------------------
+            hx, hy = int(segments[0][0]), int(segments[0][1])
+            hr     = max(5, int(11 * sc))
+            pygame.draw.circle(self.screen, (10, 44,  6),  (hx, hy), hr + 3)
+            pygame.draw.circle(self.screen, (22, 82, 14),  (hx, hy), hr + 1)
+            pygame.draw.circle(self.screen, (38, 126, 24), (hx, hy), hr)
+
+            if len(segments) > 1:
+                fdx = segments[0][0] - segments[1][0]
+                fdy = segments[0][1] - segments[1][1]
+                fdn = max(0.01, (fdx * fdx + fdy * fdy) ** 0.5)
+                fdx /= fdn;  fdy /= fdn
+                fpx, fpy = -fdy, fdx
+
+                # Snout.
+                pygame.draw.circle(self.screen, (30, 105, 20),
+                    (int(hx + fdx * hr * 0.6), int(hy + fdy * hr * 0.6)), max(3, hr - 4))
+
+                # Eyes with slit pupils.
+                for sign in (-1, 1):
+                    ex = int(hx + fpx * sign * max(2, int(5 * sc)) + fdx * 3)
+                    ey = int(hy + fpy * sign * max(2, int(5 * sc)) + fdy * 3)
+                    pygame.draw.circle(self.screen, (0, 240, 80), (ex, ey), max(2, int(3 * sc)))
+                    pygame.draw.line(self.screen, (0, 0, 0),
+                        (int(ex - fdx * 1.2), int(ey - fdy * 1.2)),
+                        (int(ex + fdx * 1.2), int(ey + fdy * 1.2)),
+                        max(1, int(1.5 * sc)))
+
+                # Tongue.
+                body_phase = ticks / 380.0 + snake["phase"]
+                if math.sin(body_phase * 1.6) > 0.6:
+                    tbx = int(hx + fdx * (hr + 3) * sc)
+                    tby = int(hy + fdy * (hr + 3) * sc)
+                    tmx = int(tbx + fdx * 6 * sc)
+                    tmy = int(tby + fdy * 6 * sc)
+                    w2  = max(1, int(1.5 * sc))
+                    pygame.draw.line(self.screen, (215, 28, 28), (tbx, tby), (tmx, tmy), w2)
+                    for sign in (-1, 1):
+                        fx = int(tmx + (fdx * 5 + fpx * sign * 4) * sc)
+                        fy = int(tmy + (fdy * 5 + fpy * sign * 4) * sc)
+                        pygame.draw.line(self.screen, (215, 28, 28), (tmx, tmy), (fx, fy), w2)
+
+    # ------------------------------------------------------------------
+    # Grid
+    # ------------------------------------------------------------------
 
     def _draw_grid(self) -> None:
         """Draw the full arena grid and its lighting passes."""
 
-        # 4 extra side-only rows above the main grid:
-        # each row has 5 tiles on the left and 5 on the right.
         for row in range(1, SIDE_EXTENSION_ROWS + 1):
             y = self.arena_y - (row * TILE_SIZE)
             row_from_top = SIDE_EXTENSION_ROWS - row + 1
@@ -683,7 +1393,6 @@ class PygameArenaWindow:
                     ),
                 )
 
-        # Tile grid (clear, readable, symmetrical split).
         for row in range(GRID_ROWS):
             for col in range(self.grid_cols):
                 x = self.arena_x + col * TILE_SIZE
@@ -713,8 +1422,6 @@ class PygameArenaWindow:
                     ),
                 )
 
-        # Global top-left directional light/shadow pass covering the full
-        # visible tile area (main grid + side extensions) for uniform lighting.
         ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
         full_h = self.arena_h + ext_h
         full_y = self.arena_y - ext_h
@@ -735,16 +1442,27 @@ class PygameArenaWindow:
         self.screen.blit(global_shadow, (self.arena_x, full_y))
         self._draw_bottom_tile_faces()
 
+    # ------------------------------------------------------------------
+    # Frame composition
+    # ------------------------------------------------------------------
+
     def _draw_frame(self) -> None:
         """Render complete environment scene."""
+
+        # Compute frame delta-time once for any motion that needs it.
+        now = pygame.time.get_ticks()
+        self._step_dt = max(0.001, min(0.1, (now - self._last_tick_ms) / 1000.0))
+        self._last_tick_ms = now
 
         self.screen.fill(SKY_BG_COLOR)
 
         self._draw_lava()
-        self._draw_lava_rocks()
-        self._draw_grid()
-        # Draw castle after grid/effects so it stays on top (no color bleed under tiles).
-        self._draw_castles()
+        self._draw_snakes()          # snakes swim IN the poison, under the rocks
+        self._draw_lava_rocks()      # rocks float on top, partially hiding snakes
+        self._draw_arena_serpent()   # giant serpent in the gap, also throws blobs
+        self._draw_grid()            # tile island on top of everything
+        self._draw_obstacles()       # toxic mushrooms on arena tiles
+        self._draw_blobs()           # poison projectiles arc and land on the arena
 
 
 def main(
