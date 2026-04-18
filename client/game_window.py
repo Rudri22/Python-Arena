@@ -169,6 +169,21 @@ class PygameArenaWindow:
         self._throw_blob_spawned = False
         self._poison_blobs: list[dict] = []
 
+        # Big serpent agent — navigates the gap above the arena.
+        _ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
+        _gx1 = float(self.arena_x + SIDE_EXTENSION_TILES * TILE_SIZE + 56)
+        _gx2 = float(self.arena_x + self.arena_w - SIDE_EXTENSION_TILES * TILE_SIZE - 56)
+        _gy1 = float(self.arena_y - _ext_h + 24)
+        _gy2 = float(self.arena_y - 20)
+        _sx  = (_gx1 + _gx2) * 0.5
+        _sy  = (_gy1 + _gy2) * 0.5
+        self._serpent_agent: dict = {
+            "x": _sx, "y": _sy,
+            "angle": 0.25, "target_angle": 0.25,
+            "speed": 58.0, "turn_rate": 0.85, "turn_timer": 2.2,
+            "history": deque([(_sx, _sy)] * 650, maxlen=650),
+        }
+
         # Frame timing for delta-time-based motion (snakes, blobs).
         self._last_tick_ms = now_ms
         self._step_dt = 1.0 / TARGET_FPS
@@ -748,6 +763,54 @@ class PygameArenaWindow:
 
     # ---- big serpent rendering ---------------------------------------
 
+    def _update_serpent_agent(self, dt: float) -> None:
+        """Steer the big serpent's head through the gap above the arena each frame."""
+
+        s = self._serpent_agent
+        ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
+        gx1 = self.arena_x + SIDE_EXTENSION_TILES * TILE_SIZE + 56
+        gx2 = self.arena_x + self.arena_w - SIDE_EXTENSION_TILES * TILE_SIZE - 56
+        gy1 = self.arena_y - ext_h + 24
+        gy2 = self.arena_y - 20
+
+        # Periodic random turn.
+        s["turn_timer"] -= dt
+        if s["turn_timer"] <= 0:
+            s["target_angle"] += random.uniform(-math.pi * 0.55, math.pi * 0.55)
+            s["turn_timer"] = random.uniform(1.4, 3.0)
+
+        # Repulsion from gap walls.
+        MARGIN = 52.0
+        x, y = s["x"], s["y"]
+        rx, ry = 0.0, 0.0
+        if x - gx1 < MARGIN: rx += (MARGIN - (x - gx1)) / MARGIN * 5.0
+        if gx2 - x < MARGIN: rx -= (MARGIN - (gx2 - x)) / MARGIN * 5.0
+        if y - gy1 < MARGIN: ry += (MARGIN - (y - gy1)) / MARGIN * 5.0
+        if gy2 - y < MARGIN: ry -= (MARGIN - (gy2 - y)) / MARGIN * 5.0
+        if rx != 0.0 or ry != 0.0:
+            repel_angle = math.atan2(ry, rx)
+            strength = (rx * rx + ry * ry) ** 0.5
+            blend = min(1.0, strength / 3.0)
+            s["target_angle"] = (repel_angle
+                                 + (1.0 - blend) * random.uniform(-0.18, 0.18))
+
+        # Smooth rotation toward target angle.
+        da = s["target_angle"] - s["angle"]
+        while da >  math.pi: da -= math.tau
+        while da < -math.pi: da += math.tau
+        rate = s["turn_rate"] * dt
+        s["angle"] += max(-rate, min(rate, da))
+
+        # Advance head.
+        s["x"] += math.cos(s["angle"]) * s["speed"] * dt
+        s["y"] += math.sin(s["angle"]) * s["speed"] * dt
+
+        # Hard-clamp so the serpent never escapes the gap.
+        s["x"] = max(float(gx1), min(float(gx2), s["x"]))
+        s["y"] = max(float(gy1), min(float(gy2), s["y"]))
+
+        s["history"].appendleft((s["x"], s["y"]))
+
     def _draw_arena_serpent(self) -> None:
         """Draw the giant decorative serpent fully inside the center gap.
 
@@ -784,40 +847,35 @@ class PygameArenaWindow:
             forward_extend = -6.0 * math.sin(sp * math.pi)
 
         ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
-        gap_x = self.arena_x + SIDE_EXTENSION_TILES * TILE_SIZE + 26
-        gap_w = self.arena_w - (SIDE_EXTENSION_TILES * 2 * TILE_SIZE) - 52
         gap_y = self.arena_y - ext_h + 16
         gap_h = ext_h - 30
-        center_y = gap_y + gap_h * 0.5
 
-        num_seg = 70
-        pts: list[tuple[float, float]] = []
-        min_x = gap_x + 14
-        max_x = gap_x + gap_w - 14
-        # Allow the head to rise above the gap during wind-up and dip below
-        # the grid line during the strike.
-        y_min_clamp = gap_y - 90
-        y_max_clamp = gap_y + gap_h + 18
+        # Move the serpent agent and sample body positions via arc-length.
+        self._update_serpent_agent(self._step_dt)
+        num_seg = 45
+        raw_pts = self._sample_arc_positions(self._serpent_agent["history"], num_seg, 14.0)
+        # Reverse so index 0 = tail and index -1 = head — matches original draw order.
+        draw_pts: list[tuple[float, float]] = list(reversed(raw_pts))
 
-        for i in range(num_seg):
-            t = i / (num_seg - 1)
-            base_x = gap_x + gap_w * (0.08 + 0.84 * t)
-            twist_x = math.sin(t * math.tau * 2.5 + phase * 0.8) * 18
-            y = (
-                center_y
-                + math.sin(t * math.tau * 1.35 + phase) * 34
-                + math.sin(t * math.tau * 4.8 + phase * 1.7) * 10
-            )
-            x = base_x + twist_x
+        # Apply throw animation to the head section (last 45% of segments).
+        if y_offset != 0.0 or forward_extend != 0.0:
+            fdx, fdy = 1.0, 0.0
+            if len(draw_pts) > 1:
+                ddx = draw_pts[-1][0] - draw_pts[-2][0]
+                ddy = draw_pts[-1][1] - draw_pts[-2][1]
+                dn = max(0.01, (ddx * ddx + ddy * ddy) ** 0.5)
+                fdx, fdy = ddx / dn, ddy / dn
+            for i in range(num_seg):
+                t_seg = i / (num_seg - 1)
+                hw_q = max(0.0, (t_seg - 0.55) / 0.45) ** 2
+                if hw_q > 0.0:
+                    px_, py_ = draw_pts[i]
+                    draw_pts[i] = (
+                        px_ + forward_extend * hw_q * fdx,
+                        py_ + y_offset * hw_q + forward_extend * hw_q * fdy,
+                    )
 
-            # Apply throw-induced offsets to the head section (last ~45%),
-            # quadratically weighted so only the head segments react.
-            head_weight = max(0.0, (t - 0.55) / 0.45)
-            hw_q = head_weight * head_weight
-            y += y_offset * hw_q
-            x += forward_extend * hw_q
-
-            pts.append((min(max(min_x, x), max_x + 30), min(max(y_min_clamp, y), y_max_clamp)))
+        pts = draw_pts  # alias — all downstream code uses pts unchanged
 
         # Body segments rendered tail->head so the head sits on top.
         for i in range(num_seg):
@@ -1059,55 +1117,55 @@ class PygameArenaWindow:
     # ---- toxic-spike obstacles ---------------------------------------
 
     def _draw_obstacles(self) -> None:
-        """Draw toxic mushroom clusters on obstacle tiles.
+        """Draw dungeon hazard obstacles: mushroom clusters, crumbled masonry, or venomous skulls.
 
-        Clusters of 3 bioluminescent mushrooms mark tiles the player must
-        avoid. They glow, have spots, and are clearly thematic.
+        Variants rotate evenly across obstacle slots (2 of each type) so all
+        three appear on the arena.  Mushrooms and skulls use the tile's
+        bottom-center as their anchor; stone rubble uses the tile center.
         """
 
         ticks = pygame.time.get_ticks()
 
-        for ob in self.obstacles:
-            # Tile bottom-center — mushrooms grow upward from here.
+        for idx, ob in enumerate(self.obstacles):
             cx = self.arena_x + ob["col"] * TILE_SIZE + TILE_SIZE // 2
-            cy = self.arena_y + ob["row"] * TILE_SIZE + TILE_SIZE - 4
+            cy_center = self.arena_y + ob["row"] * TILE_SIZE + TILE_SIZE // 2
+            cy_bottom = self.arena_y + ob["row"] * TILE_SIZE + TILE_SIZE - 4
             glow = 0.55 + 0.45 * math.sin(ticks / 600.0 + ob["phase"])
-
-            # Wide bioluminescent aura below the cluster.
-            aura_r = int(30 + 5 * glow)
-            aura = pygame.Surface((aura_r * 2 + 4, aura_r * 2 + 4), pygame.SRCALPHA)
-            pygame.draw.circle(aura, (40, 200, 20, int(50 * glow)), (aura_r + 2, aura_r + 2), aura_r)
-            pygame.draw.circle(aura, (70, 245, 40, int(85 * glow)), (aura_r + 2, aura_r + 2), aura_r - 10)
-            self.screen.blit(aura, (cx - aura_r - 2, cy - aura_r - 2))
-
-            # Three mushrooms per cluster with a deterministic RNG so each
-            # obstacle has a unique but stable look.
             rng = random.Random(ob["col"] * 101 + ob["row"] * 97)
-            configs = [
-                (cx + rng.randint(-11, 11), cy,                         rng.uniform(0.75, 1.0)),
-                (cx + rng.randint(-18, -7), cy + rng.randint(-3, 3),    rng.uniform(0.52, 0.72)),
-                (cx + rng.randint(7,  18),  cy + rng.randint(-3, 3),    rng.uniform(0.55, 0.75)),
-            ]
-            for mx, my, sc in configs:
-                self._draw_one_mushroom(int(mx), int(my), sc, glow, rng)
+
+            variant = idx % 2  # 0 = mushrooms, 1 = skull
+            if variant == 0:
+                self._draw_mushroom_cluster(cx, cy_bottom, glow, rng)
+            else:
+                self._draw_skull_obstacle(cx, cy_center, glow, rng)
+
+    # ---- mushroom cluster (original bioluminescent design) ---------------
+
+    def _draw_mushroom_cluster(self, cx: int, cy: int, glow: float, rng: random.Random) -> None:
+        """Draw three bioluminescent toxic mushrooms anchored at tile bottom-center."""
+
+        configs = [
+            (cx + rng.randint(-11, 11), cy,                        rng.uniform(0.75, 1.0)),
+            (cx + rng.randint(-18, -7), cy + rng.randint(-3, 3),   rng.uniform(0.52, 0.72)),
+            (cx + rng.randint(7,  18),  cy + rng.randint(-3, 3),   rng.uniform(0.55, 0.75)),
+        ]
+        for mx, my, sc in configs:
+            self._draw_one_mushroom(int(mx), int(my), sc, glow, rng)
 
     def _draw_one_mushroom(self, mx: int, my: int, scale: float, glow: float, rng: random.Random) -> None:
         """Draw one toxic mushroom anchored at (mx, my) — a front-facing sprite."""
 
-        cap_rx   = max(5, int(17 * scale))
-        cap_ry   = max(3, int(10 * scale))
-        stem_h   = max(4, int(20 * scale))
-        stem_wt  = max(1, int(cap_rx * 0.30))  # top width
-        stem_wb  = max(2, int(cap_rx * 0.42))  # bottom width
+        cap_rx  = max(5, int(17 * scale))
+        cap_ry  = max(3, int(10 * scale))
+        stem_h  = max(4, int(20 * scale))
+        stem_wt = max(1, int(cap_rx * 0.30))
+        stem_wb = max(2, int(cap_rx * 0.42))
+        cap_cy  = my - stem_h - cap_ry // 2
 
-        cap_cy   = my - stem_h - cap_ry // 2  # y of cap centre
-
-        # Ground shadow.
         shad = pygame.Surface((cap_rx * 2 + 10, 8), pygame.SRCALPHA)
         pygame.draw.ellipse(shad, (0, 18, 0, 130), shad.get_rect().inflate(-4, -2))
         self.screen.blit(shad, (mx - cap_rx - 5, my - 4))
 
-        # Stem.
         stem_pts = [
             (mx - stem_wt, my - stem_h),
             (mx + stem_wt, my - stem_h),
@@ -1118,21 +1176,16 @@ class PygameArenaWindow:
         pygame.draw.line(self.screen, (100, 168, 58),
                          (mx, my - stem_h + 2), (mx, my - 2), max(1, stem_wt - 1))
 
-        # Underside of cap (slightly lighter, flat half-oval).
         pygame.draw.ellipse(self.screen, (48, 112, 26),
                             pygame.Rect(mx - cap_rx, cap_cy + cap_ry // 2,
                                         cap_rx * 2, max(3, cap_ry // 2)))
 
-        # Cap body.
         cap_rect = pygame.Rect(mx - cap_rx, cap_cy - cap_ry, cap_rx * 2, cap_ry * 2 + cap_ry // 2)
         pygame.draw.ellipse(self.screen, (20, 74, 10), cap_rect)
         pygame.draw.ellipse(self.screen, (36, 118, 18), cap_rect.inflate(-4, -3))
-
-        # Cap top highlight.
         pygame.draw.ellipse(self.screen, (72, 188, 36),
                             pygame.Rect(mx - cap_rx // 2, cap_cy - cap_ry + 2, cap_rx, cap_ry - 2))
 
-        # Spots (deterministic per mushroom via shared rng).
         for _ in range(rng.randint(2, 5)):
             sx = mx + rng.randint(-cap_rx + 3, cap_rx - 3)
             sy = cap_cy - cap_ry // 2 + rng.randint(-cap_ry // 2, cap_ry // 4)
@@ -1140,16 +1193,110 @@ class PygameArenaWindow:
             pygame.draw.circle(self.screen, (185, 255, 75), (sx, sy), sr)
             pygame.draw.circle(self.screen, (235, 255, 190), (sx, sy), max(1, sr - 1))
 
-        # Glowing cap aura.
         aura_w = cap_rx * 2 + 14
         aura_h = cap_ry * 2 + 8
         cap_aura = pygame.Surface((aura_w, aura_h), pygame.SRCALPHA)
         pygame.draw.ellipse(cap_aura, (50, 220, 28, int(60 * glow)), cap_aura.get_rect())
         self.screen.blit(cap_aura, (mx - aura_w // 2, cap_cy - cap_ry - 4))
 
+    # ---- venom skull (poison-dungeon themed) -----------------------------
+
+    def _draw_skull_obstacle(self, cx: int, cy: int, glow: float, rng: random.Random) -> None:
+        """Draw a dungeon skull stained with venom — glowing green eye sockets match the arena."""
+
+        r = 15
+
+        # Ground shadow.
+        shad = pygame.Surface((r * 2 + 10, 10), pygame.SRCALPHA)
+        pygame.draw.ellipse(shad, (0, 0, 0, 100), shad.get_rect().inflate(-4, -2))
+        self.screen.blit(shad, (cx - r - 5, cy + r - 3))
+
+        # Skull dome — dark stone, not bright bone, so it reads as "dungeon artefact".
+        pygame.draw.circle(self.screen, (30, 34, 30), (cx, cy), r + 1)   # dark rim
+        pygame.draw.circle(self.screen, (56, 62, 52), (cx, cy), r)        # muted stone-green
+        pygame.draw.circle(self.screen, (74, 82, 68), (cx - 3, cy - 4), r - 5)  # top highlight
+
+        # Eye sockets with bright poison glow — the visual hook that ties the skull
+        # to the rest of the arena's green-poison colour language.
+        eye_y = cy + 2
+        for sign in (-1, 1):
+            ex = cx + sign * 6
+            # Socket cavity.
+            pygame.draw.ellipse(self.screen, (12, 16, 10),
+                                pygame.Rect(ex - 5, eye_y - 4, 10, 8))
+            # Inner glow surface.
+            gs = pygame.Surface((12, 10), pygame.SRCALPHA)
+            pygame.draw.ellipse(gs, (0, 210, 45, int(180 * glow)), gs.get_rect().inflate(-2, -2))
+            self.screen.blit(gs, (ex - 6, eye_y - 5))
+            # Bright core point.
+            pygame.draw.ellipse(self.screen, (80, 255, 100),
+                                pygame.Rect(ex - 3, eye_y - 2, 6, 4))
+
+        # Nasal cavity.
+        pygame.draw.polygon(self.screen, (14, 18, 12), [
+            (cx,     cy + 6),
+            (cx - 3, cy + 10),
+            (cx + 3, cy + 10),
+        ])
+
+        # Jaw strip.
+        pygame.draw.ellipse(self.screen, (44, 50, 40),
+                            pygame.Rect(cx - r + 3, cy + r - 5, (r - 3) * 2, 8))
+        pygame.draw.ellipse(self.screen, (30, 34, 28),
+                            pygame.Rect(cx - r + 5, cy + r - 3, (r - 5) * 2, 4))
+
+        # Venom-stained cracks — green tint matches the poison lake.
+        for crack_pts in [
+            [(cx - 2, cy - r + 2), (cx - 8, cy - 3), (cx - 4, cy + 3)],
+            [(cx + 3, cy - r + 4), (cx + 7, cy + 1), (cx + 2, cy + 7)],
+        ]:
+            pygame.draw.lines(self.screen, (20, 75, 18), False, crack_pts, 1)
+
     # ------------------------------------------------------------------
     # Small pool snakes
     # ------------------------------------------------------------------
+
+    def _sample_arc_positions(
+        self,
+        history: deque,
+        num_segs: int,
+        spacing: float,
+    ) -> list[tuple[float, float]]:
+        """Return num_segs positions spaced 'spacing' pixels apart along the path history.
+
+        Uses true arc-length parameterisation with linear interpolation between
+        samples so segments flow smoothly regardless of frame rate or speed.
+        """
+        pts: list[tuple[float, float]] = []
+        it = iter(history)
+        try:
+            px, py = next(it)
+        except StopIteration:
+            return [(0.0, 0.0)] * num_segs
+
+        pts.append((px, py))
+        if num_segs <= 1:
+            return pts
+
+        target = spacing
+        acc = 0.0
+
+        for nx, ny in it:
+            dx = nx - px
+            dy = ny - py
+            seg_len = (dx * dx + dy * dy) ** 0.5
+            while acc + seg_len >= target and len(pts) < num_segs:
+                t = (target - acc) / seg_len if seg_len > 0.0 else 0.0
+                pts.append((px + t * dx, py + t * dy))
+                target += spacing
+            acc += seg_len
+            px, py = nx, ny
+            if len(pts) >= num_segs:
+                break
+
+        while len(pts) < num_segs:
+            pts.append((px, py))
+        return pts
 
     def _draw_snakes(self) -> None:
         """Update and draw pool snakes using full 2-D agent motion.
@@ -1244,14 +1391,10 @@ class PygameArenaWindow:
             # ---- update position history ------------------------------------
             snake["history"].appendleft((snake["x"], snake["y"]))
 
-            # ---- build segment positions from history -----------------------
+            # ---- build segment positions from history (arc-length) ----------
             length = snake["length"]
-            # How many history frames between adjacent segments.
-            stride = max(1, int(11.0 * sc * TARGET_FPS / speed))
-            segments: list[tuple[float, float]] = [
-                snake["history"][min(len(snake["history"]) - 1, i * stride)]
-                for i in range(length)
-            ]
+            spacing = max(6.0, 11.0 * sc)
+            segments = self._sample_arc_positions(snake["history"], length, spacing)
 
             # Skip drawing if fully off-screen.
             if not any(-50 < sx < WINDOW_WIDTH + 50 and -50 < sy < WINDOW_HEIGHT + 50
