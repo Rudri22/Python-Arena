@@ -16,6 +16,18 @@ from pathlib import Path
 
 import pygame
 
+import queue
+import threading
+
+from client.network import ClientConnection
+from shared.protocol import (
+    MessageType,
+    make_chat_message,
+    make_invitation_message,
+    make_movement_message,
+    make_username_message,
+)
+
 WINDOW_WIDTH = 1220
 WINDOW_HEIGHT = 780
 WINDOW_TITLE = "Python-Arena - Arena Rebuild"
@@ -30,6 +42,54 @@ SIDE_EXTENSION_TILES = 5
 ARENA_TOP = 255
 ARENA_DIR = Path(__file__).resolve().parents[1] / "assets" / "arena"
 TERRAIN_DIR = Path(__file__).resolve().parents[1] / "assets" / "terrain"
+
+# ── Gameplay grid (mirrors server/game_engine.py) ──────────────────────────
+GAME_BOARD_COLS = 20
+GAME_BOARD_ROWS = 20
+# Cell dimensions — X aligns with visual tiles; Y covers main arena + side wings
+GAME_CELL_W = float(GRID_COLS * TILE_SIZE) / GAME_BOARD_COLS                      # 52.0 px
+GAME_CELL_H = float((GRID_ROWS + SIDE_EXTENSION_ROWS) * TILE_SIZE) / GAME_BOARD_ROWS  # 33.8 px
+
+# The centre gap where the serpent lives (unwalkable for player snakes).
+# Expressed in game-grid columns and the number of rows that fall inside the wings.
+GAP_COL_START = SIDE_EXTENSION_TILES                      # col 5
+GAP_COL_END   = GRID_COLS - SIDE_EXTENSION_TILES          # col 15
+GAP_ROW_END   = int(SIDE_EXTENSION_ROWS * TILE_SIZE / GAME_CELL_H) + 1  # ≈ row 7
+BASE_SNAKE_LENGTH = 3
+LOCAL_INITIAL_HEALTH = 1000
+HEALTH_PER_GROWTH_SEGMENT = 10
+PIE_HEALTH_GAIN = 15
+OBSTACLE_COLLISION_DAMAGE = 20
+SNAKE_COLLISION_DAMAGE = 20
+MOVE_INTERVAL_MS = 120
+STATE_INTERPOLATION_MS = 120
+# Static obstacle positions matching game_engine.py (game-grid coords)
+STATIC_OBSTACLES_GAME: tuple[tuple[int, int], ...] = (
+    (9, 7), (10, 7), (9, 12), (10, 12), (5, 10), (14, 10),
+)
+# Snake palette
+SNAKE_A_BODY = (50, 215, 90)
+SNAKE_A_HEAD = (20, 160, 50)
+SNAKE_A_GLOW = (30, 240, 80, 90)
+SNAKE_B_BODY = (255, 175, 35)
+SNAKE_B_HEAD = (220, 125, 15)
+SNAKE_B_GLOW = (255, 200, 60, 90)
+BERRY_COLOR  = (200, 255, 100)
+# HUD palette
+HUD_BG       = (12, 16, 24)
+HUD_TEXT     = (230, 240, 248)
+HUD_DIM      = (130, 155, 180)
+HUD_ACCENT   = (80, 200, 255)
+HUD_HEALTH_A = (50, 215, 90)
+HUD_HEALTH_B = (255, 175, 35)
+HUD_DANGER   = (220, 60, 60)
+
+_DIRECTIONS: dict[str, tuple[int, int]] = {
+    "up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0),
+}
+_OPPOSITE_DIRECTION: dict[str, str] = {
+    "up": "down", "down": "up", "left": "right", "right": "left",
+}
 
 
 class PygameArenaWindow:
@@ -187,6 +247,76 @@ class PygameArenaWindow:
         # Frame timing for delta-time-based motion (snakes, blobs).
         self._last_tick_ms = now_ms
         self._step_dt = 1.0 / TARGET_FPS
+
+        # ── Gameplay networking ────────────────────────────────────────
+        self.connection: ClientConnection | None = None
+        self.receiver_thread: threading.Thread | None = None
+        self.incoming_queue: queue.Queue[dict] = queue.Queue()
+        self.username_confirmed = False
+        self.online_users: list[str] = []
+        self.pending_invite_to: str | None = None
+        self.pending_invite_sent_ms = 0
+        self.pending_spectate_to: str | None = None
+        self.active_game_id: str | None = None
+        self.has_authoritative_state = False
+        self.match_status = "waiting"
+        self.match_winner = "-"
+        self.timer_remaining = 0
+        self.timer_elapsed = 0
+        self.connection_healthy = True
+        self.connection_notice = ""
+        self.player_a_name = username
+        self.player_b_name = "Opponent"
+        self.last_server_message = "Connecting..."
+        self.last_move_ms = now_ms
+
+        # ── Game entity state ──────────────────────────────────────────
+        self.snake_a: list[tuple[int, int]] = [(3, 9), (2, 9), (1, 9)]
+        self.snake_b: list[tuple[int, int]] = [(16, 11), (17, 11), (18, 11)]
+        self.snake_a_direction = "right"
+        self.snake_b_direction = "left"
+        self.snake_a_health = LOCAL_INITIAL_HEALTH
+        self.snake_b_health = LOCAL_INITIAL_HEALTH
+        self.game_pies: list[tuple[int, int]] = []
+        self.game_obstacles: list[tuple[int, int]] = []
+
+        # ── Interpolation ──────────────────────────────────────────────
+        self.render_snake_a: list[tuple[float, float]] = [(float(x), float(y)) for x, y in self.snake_a]
+        self.render_snake_b: list[tuple[float, float]] = [(float(x), float(y)) for x, y in self.snake_b]
+        self.interp_from_snake_a: list[tuple[float, float]] = []
+        self.interp_from_snake_b: list[tuple[float, float]] = []
+        self.interp_to_snake_a: list[tuple[float, float]] = []
+        self.interp_to_snake_b: list[tuple[float, float]] = []
+        self.state_interp_start_ms = 0
+
+        # ── Result + chat ──────────────────────────────────────────────
+        self.show_result_screen = False
+        self.result_winner = "-"
+        self.result_reason = "-"
+        self.result_scores: dict[str, int] = {}
+        self.return_to_lobby_requested = False
+        self.chat_messages: deque[str] = deque(maxlen=6)
+        self.chat_input = ""
+        self.chat_typing = False
+        self.cheer_pulse_until_ms = 0
+
+        # ── Fonts ──────────────────────────────────────────────────────
+        self.font_hud       = pygame.font.SysFont("consolas", 22, bold=True)
+        self.font_hud_sm    = pygame.font.SysFont("consolas", 16)
+        self.font_result    = pygame.font.SysFont("consolas", 34, bold=True)
+        self.font_result_body = pygame.font.SysFont("consolas", 21)
+        self.font_result_title = pygame.font.SysFont("consolas", 54, bold=True)
+        self.font_result_name  = pygame.font.SysFont("consolas", 22, bold=True)
+        self.font_result_hp    = pygame.font.SysFont("consolas", 20)
+
+        # ── Game rendering area — aligned exactly to the visual island tiles ─
+        # x-cells are 52 px wide (= TILE_SIZE), y-cells are 23.4 px tall so
+        # all 20 server rows fit within the 9-tile-high arena rectangle.
+        self.game_origin_x = self.arena_x
+        self.game_origin_y = self.arena_y - SIDE_EXTENSION_ROWS * TILE_SIZE
+
+        self._reset_local_round_layout()
+        self._connect_to_server()
 
     # ------------------------------------------------------------------
     # Castle wall loading (kept for castle_tile_texture; never drawn)
@@ -530,23 +660,77 @@ class PygameArenaWindow:
     # ------------------------------------------------------------------
 
     def run(self) -> bool:
-        """Run loop and render only arena environment."""
+        """Main game loop."""
 
         while self.running:
             self._handle_events()
+            self._drain_incoming_queue()
+            self._update_movement()
             self._draw_frame()
             pygame.display.flip()
             self.clock.tick(TARGET_FPS)
 
-        pygame.quit()
-        return False
+        self._disconnect_from_server()
+        if self.return_to_lobby_requested and self.return_to_tk_lobby:
+            pygame.quit()
+            self._launch_lobby()
+        elif self.return_to_lobby_requested and self.keep_window_open_on_return:
+            pass
+        else:
+            pygame.quit()
+        return self.return_to_lobby_requested
 
     def _handle_events(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                self.running = False
+            elif event.type == pygame.KEYDOWN:
+                if self._handle_chat_key(event):
+                    continue
+                if event.key == pygame.K_ESCAPE:
+                    self.running = False
+                elif event.key == pygame.K_r and self.show_result_screen:
+                    self.return_to_lobby_requested = True
+                    self.running = False
+                elif event.key == pygame.K_c:
+                    self.cheer_pulse_until_ms = pygame.time.get_ticks() + 650
+                elif event.key == pygame.K_t:
+                    self.chat_typing = True
+                self._handle_direction_input(event.key)
+
+    def _handle_chat_key(self, event: pygame.event.Event) -> bool:
+        if event.key == pygame.K_RETURN:
+            if self.chat_typing:
+                self._submit_chat()
+            else:
+                self.chat_typing = True
+            return True
+        if event.key == pygame.K_ESCAPE and self.chat_typing:
+            self.chat_typing = False
+            self.chat_input = ""
+            return True
+        if not self.chat_typing:
+            return False
+        if event.key == pygame.K_BACKSPACE:
+            self.chat_input = self.chat_input[:-1]
+            return True
+        if event.unicode and event.unicode.isprintable():
+            self.chat_input += event.unicode
+            if len(self.chat_input) > 120:
+                self.chat_input = self.chat_input[:120]
+            return True
+        return False
+
+    def _submit_chat(self) -> None:
+        text = self.chat_input.strip()
+        self.chat_typing = False
+        self.chat_input = ""
+        if not text or self.connection is None:
+            return
+        try:
+            self.connection.send_message(make_chat_message(sender=self.username, message=text))
+        except OSError:
+            self.chat_messages.append("[CHAT] Send failed.")
 
     # ------------------------------------------------------------------
     # Tile drawing
@@ -1061,6 +1245,15 @@ class PygameArenaWindow:
                 blob["splat_at"] = ticks
                 blob["splat_x"] = blob["x"]
                 blob["splat_y"] = blob["target_y"]
+                # Blob landing spawns a collectible health berry — only on valid island tiles.
+                gcol = int((blob["x"] - self.game_origin_x) / GAME_CELL_W)
+                grow = int((blob["target_y"] - self.game_origin_y) / GAME_CELL_H)
+                if not self._is_out_of_bounds(gcol, grow):
+                    cell = (gcol, grow)
+                    occupied = (set(self.game_obstacles) | set(self.snake_a)
+                                | set(self.snake_b) | set(self.game_pies))
+                    if cell not in occupied:
+                        self.game_pies.append(cell)
                 survivors.append(blob)
                 continue
             if blob["x"] < -60 or blob["x"] > WINDOW_WIDTH + 60 or blob["y"] > WINDOW_HEIGHT + 60:
@@ -1117,27 +1310,27 @@ class PygameArenaWindow:
     # ---- toxic-spike obstacles ---------------------------------------
 
     def _draw_obstacles(self) -> None:
-        """Draw dungeon hazard obstacles: mushroom clusters, crumbled masonry, or venomous skulls.
+        """Draw mushrooms/skulls directly at the authoritative game-obstacle positions.
 
-        Variants rotate evenly across obstacle slots (2 of each type) so all
-        three appear on the arena.  Mushrooms and skulls use the tile's
-        bottom-center as their anchor; stone rubble uses the tile center.
+        game_obstacles uses the server's 20×20 grid, so the art sits exactly
+        where collision is checked — snakes cannot visually walk through them.
         """
 
         ticks = pygame.time.get_ticks()
 
-        for idx, ob in enumerate(self.obstacles):
-            cx = self.arena_x + ob["col"] * TILE_SIZE + TILE_SIZE // 2
-            cy_center = self.arena_y + ob["row"] * TILE_SIZE + TILE_SIZE // 2
-            cy_bottom = self.arena_y + ob["row"] * TILE_SIZE + TILE_SIZE - 4
-            glow = 0.55 + 0.45 * math.sin(ticks / 600.0 + ob["phase"])
-            rng = random.Random(ob["col"] * 101 + ob["row"] * 97)
+        for idx, (gcol, grow) in enumerate(self.game_obstacles):
+            px, py = self._game_to_pixel(gcol, grow)
+            cx = int(px)
+            cy = int(py)
+            phase = (gcol * 1.1 + grow * 0.7) % (2 * math.pi)
+            glow  = 0.55 + 0.45 * math.sin(ticks / 600.0 + phase)
+            rng   = random.Random(gcol * 101 + grow * 97)
 
-            variant = idx % 2  # 0 = mushrooms, 1 = skull
-            if variant == 0:
-                self._draw_mushroom_cluster(cx, cy_bottom, glow, rng)
+            if idx % 2 == 0:
+                # anchor mushrooms at bottom of the cell
+                self._draw_mushroom_cluster(cx, cy + int(GAME_CELL_H * 0.45), glow, rng)
             else:
-                self._draw_skull_obstacle(cx, cy_center, glow, rng)
+                self._draw_skull_obstacle(cx, cy, glow, rng)
 
     # ---- mushroom cluster (original bioluminescent design) ---------------
 
@@ -1585,12 +1778,694 @@ class PygameArenaWindow:
         self.screen.blit(global_shadow, (self.arena_x, full_y))
         self._draw_bottom_tile_faces()
 
+    # ==================================================================
+    # Gameplay: networking
+    # ==================================================================
+
+    def _connect_to_server(self) -> None:
+        try:
+            self.connection = ClientConnection(server_ip=self.server_ip, server_port=self.server_port)
+        except Exception as err:
+            self._mark_connection_issue(f"Unable to connect: {err}")
+            return
+        self.last_server_message = f"Connected to {self.server_ip}:{self.server_port}"
+        self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        self.receiver_thread.start()
+        self.connection.send_message(make_username_message(self.username))
+
+    def _disconnect_from_server(self) -> None:
+        if self.connection is not None:
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+            self.connection = None
+
+    def _receiver_loop(self) -> None:
+        while self.running and self.connection is not None:
+            try:
+                msg = self.connection.receive_message()
+            except Exception as err:
+                self.incoming_queue.put({"type": "socket_error", "payload": {"message": str(err)}})
+                break
+            self.incoming_queue.put(msg)
+
+    def _drain_incoming_queue(self) -> None:
+        while True:
+            try:
+                msg = self.incoming_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_server_message(msg)
+
+    def _handle_server_message(self, message: dict) -> None:
+        msg_type = message.get("type")
+        payload  = message.get("payload", {})
+
+        if msg_type == MessageType.CONNECT.value:
+            self.last_server_message = f"Session: {payload.get('client_id', 'unknown')}"
+            return
+
+        if msg_type == MessageType.ONLINE_USERS.value:
+            self.online_users = list(payload.get("users", []))
+            self.username_confirmed = any(
+                u.casefold() == self.username.casefold() for u in self.online_users
+            )
+            self.last_server_message = f"Online: {len(self.online_users)}"
+            if self.spectator_mode:
+                self._maybe_request_spectate()
+            else:
+                self._maybe_send_auto_invite()
+            return
+
+        if msg_type == MessageType.INVITATION.value:
+            action    = str(payload.get("action", "")).lower()
+            from_user = str(payload.get("from_user", ""))
+            to_user   = str(payload.get("to_user", ""))
+            if action == "send" and to_user.casefold() == self.username.casefold():
+                if self.spectator_mode:
+                    if self.connection is not None:
+                        self.connection.send_message(
+                            make_invitation_message(from_user=from_user, to_user=self.username, action="decline")
+                        )
+                    return
+                if self.connection is not None:
+                    self.connection.send_message(
+                        make_invitation_message(from_user=from_user, to_user=self.username, action="accept")
+                    )
+                self.last_server_message = f"Accepted invite from {from_user}"
+                return
+            if action == "match_started":
+                self.active_game_id = payload.get("game_id")
+                self.pending_invite_to = None
+                self._reset_local_round_layout()
+                self.last_server_message = f"Match started ({self.active_game_id})"
+                return
+            if action == "spectate_joined":
+                self.active_game_id = payload.get("game_id", self.active_game_id)
+                self.pending_spectate_to = None
+                return
+            if action in {"declined", "cancelled"}:
+                self.pending_invite_to = None
+            return
+
+        if msg_type == MessageType.GAME_STATE.value:
+            self.active_game_id = payload.get("game_id", self.active_game_id)
+            state = payload.get("state", {})
+            self._sync_from_game_state(state)
+            self.has_authoritative_state = True
+            self.last_server_message = "Game state updated"
+            return
+
+        if msg_type == MessageType.CHAT.value:
+            sender = str(payload.get("sender", "SERVER"))
+            text   = str(payload.get("message", ""))
+            if str(payload.get("scope", "")).lower() == "lobby":
+                return
+            self.chat_messages.append(f"{sender}: {text}")
+            return
+
+        if msg_type == MessageType.GAME_OVER.value:
+            self.show_result_screen = True
+            self.result_winner = str(payload.get("winner", "-"))
+            self.result_reason = str(payload.get("reason", "-"))
+            self.result_scores = dict(payload.get("final_scores", {}))
+            self.last_server_message = f"Game over. Winner: {self.result_winner}"
+            return
+
+        if msg_type == MessageType.ERROR.value:
+            self.last_server_message = str(payload.get("message", "Error"))
+            low = self.last_server_message.lower()
+            if "invitation" in low or "busy" in low or "offline" in low:
+                self.pending_invite_to  = None
+                self.pending_spectate_to = None
+                if self.spectator_mode:
+                    self._maybe_request_spectate()
+                else:
+                    self._maybe_send_auto_invite()
+            return
+
+        if msg_type == "socket_error":
+            self._mark_connection_issue(str(payload.get("message", "Lost connection.")))
+
+    def _mark_connection_issue(self, message: str) -> None:
+        self.connection_healthy  = False
+        self.connection_notice   = message
+        self.last_server_message = message
+        self.match_status = "disconnected"
+        self._disconnect_from_server()
+
+    def _maybe_send_auto_invite(self) -> None:
+        if self.connection is None or not self.username_confirmed or self.active_game_id is not None:
+            return
+        if self.pending_invite_to is not None:
+            return
+        opponents = [u for u in self.online_users if u.casefold() != self.username.casefold()]
+        if not opponents:
+            return
+        preferred = self.preferred_opponent
+        if preferred:
+            matching = [u for u in opponents if u.casefold() == preferred.casefold()]
+            if matching:
+                opponent = matching[0]
+                if self.username.casefold() > opponent.casefold():
+                    return
+            else:
+                opponent = opponents[0]
+        else:
+            opponent = opponents[0]
+        self.connection.send_message(
+            make_invitation_message(from_user=self.username, to_user=opponent, action="send")
+        )
+        self.pending_invite_to      = opponent
+        self.pending_invite_sent_ms = pygame.time.get_ticks()
+        self.last_server_message    = f"Invited {opponent}"
+
+    def _maybe_request_spectate(self) -> None:
+        if self.connection is None or not self.username_confirmed or self.active_game_id is not None:
+            return
+        if self.pending_spectate_to is not None:
+            return
+        targets = [u for u in self.online_users if u.casefold() != self.username.casefold()]
+        if not targets:
+            return
+        preferred = self.preferred_opponent
+        target = (
+            next((u for u in targets if u.casefold() == preferred.casefold()), targets[0])
+            if preferred else targets[0]
+        )
+        self.connection.send_message(
+            make_invitation_message(from_user=self.username, to_user=target, action="spectate")
+        )
+        self.pending_spectate_to    = target
+        self.last_server_message    = f"Spectating {target}..."
+
+    # ==================================================================
+    # Gameplay: state sync + interpolation
+    # ==================================================================
+
+    def _sync_from_game_state(self, state: dict) -> None:
+        old_a = list(self.snake_a)
+        old_b = list(self.snake_b)
+        snakes = state.get("snakes", [])
+        my_snake  = next((s for s in snakes if str(s.get("player", "")).casefold() == self.username.casefold()), None)
+        opp_snake = next((s for s in snakes if str(s.get("player", "")).casefold() != self.username.casefold()), None)
+        if my_snake is None and snakes:
+            my_snake = snakes[0]
+        if opp_snake is None and len(snakes) >= 2:
+            opp_snake = snakes[1]
+
+        if my_snake is not None:
+            self.player_a_name = str(my_snake.get("player", self.player_a_name))
+            body = my_snake.get("body", [])
+            if body:
+                self.snake_a = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
+            self.snake_a_health = int(my_snake.get("health", self.snake_a_health))
+
+        if opp_snake is not None:
+            self.player_b_name = str(opp_snake.get("player", self.player_b_name))
+            body = opp_snake.get("body", [])
+            if body:
+                self.snake_b = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
+            self.snake_b_health = int(opp_snake.get("health", self.snake_b_health))
+
+        pies_raw = state.get("pies", [])
+        if pies_raw:
+            self.game_pies = [
+                (px, py)
+                for p in pies_raw
+                for px, py in [(
+                    int(p.get("position", {}).get("x", 0)),
+                    int(p.get("position", {}).get("y", 0)),
+                )]
+                if not self._is_out_of_bounds(px, py)
+            ]
+
+        # Blob-spawned pies live only on the client — the server's authoritative
+        # snake update won't remove them. Consume any pie a snake head just moved onto.
+        self._consume_local_pies_on_heads()
+
+        obs_raw = state.get("obstacles", [])
+        if obs_raw:
+            self.game_obstacles = [
+                (int(o.get("position", {}).get("x", 0)), int(o.get("position", {}).get("y", 0)))
+                for o in obs_raw
+            ]
+
+        timer = state.get("timer", {})
+        self.timer_remaining = int(timer.get("remaining_seconds", self.timer_remaining))
+        self.timer_elapsed   = int(timer.get("elapsed_seconds",   self.timer_elapsed))
+        self.match_status    = str(state.get("status", self.match_status))
+        self.match_winner    = str(state.get("winner") or self.match_winner)
+        self._start_state_interpolation(old_a, old_b)
+
+    def _start_state_interpolation(self, old_a: list, old_b: list) -> None:
+        def to_float(cells: list) -> list:
+            return [(float(x), float(y)) for x, y in cells]
+
+        to_a = to_float(self.snake_a)
+        to_b = to_float(self.snake_b)
+        from_a = (list(self.render_snake_a) if len(self.render_snake_a) == len(to_a) and self.render_snake_a
+                  else to_float(old_a or self.snake_a))
+        from_b = (list(self.render_snake_b) if len(self.render_snake_b) == len(to_b) and self.render_snake_b
+                  else to_float(old_b or self.snake_b))
+        if len(from_a) != len(to_a):
+            from_a = list(to_a)
+        if len(from_b) != len(to_b):
+            from_b = list(to_b)
+        self.interp_from_snake_a   = from_a
+        self.interp_to_snake_a     = to_a
+        self.interp_from_snake_b   = from_b
+        self.interp_to_snake_b     = to_b
+        self.state_interp_start_ms = pygame.time.get_ticks()
+        self.render_snake_a = list(from_a)
+        self.render_snake_b = list(from_b)
+
+    def _update_interpolated_snakes(self) -> None:
+        if not self.interp_to_snake_a and not self.interp_to_snake_b:
+            return
+        elapsed = pygame.time.get_ticks() - self.state_interp_start_ms
+        t = max(0.0, min(1.0, elapsed / STATE_INTERPOLATION_MS)) if STATE_INTERPOLATION_MS > 0 else 1.0
+
+        def lerp(start: list, end: list) -> list:
+            if len(start) != len(end):
+                return list(end)
+            return [(sx + (ex - sx) * t, sy + (ey - sy) * t) for (sx, sy), (ex, ey) in zip(start, end)]
+
+        self.render_snake_a = lerp(self.interp_from_snake_a, self.interp_to_snake_a)
+        self.render_snake_b = lerp(self.interp_from_snake_b, self.interp_to_snake_b)
+
+    # ==================================================================
+    # Gameplay: movement + input
+    # ==================================================================
+
+    def _handle_direction_input(self, key: int) -> None:
+        direction_map = {
+            pygame.K_UP: "up",    pygame.K_w: "up",
+            pygame.K_DOWN: "down", pygame.K_s: "down",
+            pygame.K_LEFT: "left", pygame.K_a: "left",
+            pygame.K_RIGHT: "right", pygame.K_d: "right",
+        }
+        if key in direction_map:
+            requested = direction_map[key]
+            if _OPPOSITE_DIRECTION.get(self.snake_a_direction) != requested:
+                self.snake_a_direction = requested
+
+    def _update_movement(self) -> None:
+        if self.show_result_screen or not self.connection_healthy:
+            return
+        if self.spectator_mode:
+            return
+        now = pygame.time.get_ticks()
+        if now - self.last_move_ms < MOVE_INTERVAL_MS:
+            if (self.active_game_id is None and self.pending_invite_to is not None
+                    and now - self.pending_invite_sent_ms > 1500):
+                self.pending_invite_to = None
+                self._maybe_send_auto_invite()
+            return
+        self.last_move_ms = now
+        if not self.has_authoritative_state:
+            self._step_local_physics()
+            self._check_local_game_over()
+            if self.show_result_screen:
+                return
+        self._send_movement_command(self.snake_a_direction)
+
+    def _send_movement_command(self, direction: str) -> None:
+        if self.connection is None or not self.username_confirmed or self.active_game_id is None:
+            return
+        try:
+            self.connection.send_message(make_movement_message(player=self.username, direction=direction))
+        except OSError as err:
+            self._mark_connection_issue(f"Move send failed: {err}")
+
+    # ==================================================================
+    # Gameplay: local physics fallback (used before server state arrives)
+    # ==================================================================
+
+    def _is_out_of_bounds(self, x: int, y: int) -> bool:
+        # Outer walls
+        if x < 1 or x >= GAME_BOARD_COLS - 1 or y < 1 or y >= GAME_BOARD_ROWS - 1:
+            return True
+        # Centre-top gap (serpent's domain between the two wings) is impassable.
+        # The left (cols 1-4) and right (cols 15-18) wings at rows 1-6 ARE valid island tiles.
+        if GAP_COL_START <= x < GAP_COL_END and y < GAP_ROW_END:
+            return True
+        return False
+
+    def _pushback_cell(self, hx: int, hy: int, dx: int, dy: int) -> tuple[int, int]:
+        return (hx - dx, hy - dy)
+
+    def _reset_local_round_layout(self) -> None:
+        self.game_obstacles = list(STATIC_OBSTACLES_GAME)
+        self.game_pies = []  # berries come only from serpent blob landings
+
+    def _consume_local_pies_on_heads(self) -> None:
+        """Remove any blob-spawned pie that sits under a snake head and heal locally.
+
+        Needed because blob pies are client-only; the server's snake step won't
+        flag them as eaten, so without this they'd phase right through the snake.
+        """
+
+        if not self.game_pies:
+            return
+        pies = set(self.game_pies)
+        eaten: set[tuple[int, int]] = set()
+        if self.snake_a:
+            head_a = self.snake_a[0]
+            if head_a in pies:
+                eaten.add(head_a)
+                self.snake_a_health += PIE_HEALTH_GAIN
+        if self.snake_b:
+            head_b = self.snake_b[0]
+            if head_b in pies:
+                eaten.add(head_b)
+                self.snake_b_health += PIE_HEALTH_GAIN
+        if eaten:
+            self.game_pies = [p for p in self.game_pies if p not in eaten]
+
+    def _adjust_snake_length(self, snake_cells: list, health: int) -> None:
+        growth = max(0, (health - LOCAL_INITIAL_HEALTH) // HEALTH_PER_GROWTH_SEGMENT)
+        target = BASE_SNAKE_LENGTH + growth
+        if len(snake_cells) > target:
+            del snake_cells[target:]
+        elif len(snake_cells) < target and snake_cells:
+            snake_cells.extend([snake_cells[-1]] * (target - len(snake_cells)))
+
+    def _step_preview_snake(
+        self,
+        snake_cells: list,
+        direction: str,
+        health_attr: str,
+        opponent_cells: list,
+    ) -> None:
+        dx, dy   = _DIRECTIONS[direction]
+        hx, hy   = snake_cells[0]
+        next_head = (hx + dx, hy + dy)
+        health    = int(getattr(self, health_attr))
+
+        hit_wall = self._is_out_of_bounds(*next_head)
+        hit_obs  = next_head in self.game_obstacles or hit_wall
+        hit_opp  = next_head in opponent_cells
+
+        if hit_obs or hit_opp:
+            dmg    = OBSTACLE_COLLISION_DAMAGE if hit_obs else SNAKE_COLLISION_DAMAGE
+            health = max(0, health - dmg)
+            pb = self._pushback_cell(hx, hy, dx, dy)
+            if not (self._is_out_of_bounds(*pb) or pb in self.game_obstacles
+                    or pb in opponent_cells or pb in snake_cells):
+                snake_cells.insert(0, pb)
+                snake_cells.pop()
+            setattr(self, health_attr, health)
+            self._adjust_snake_length(snake_cells, health)
+            return
+
+        ate = next_head in self.game_pies
+        snake_cells.insert(0, next_head)
+        if ate:
+            health += PIE_HEALTH_GAIN
+            self.game_pies.remove(next_head)
+        else:
+            snake_cells.pop()
+        self._adjust_snake_length(snake_cells, health)
+        setattr(self, health_attr, health)
+
+    def _step_local_physics(self) -> None:
+        self._step_preview_snake(self.snake_a, self.snake_a_direction, "snake_a_health", self.snake_b)
+        self._step_preview_snake(self.snake_b, self.snake_b_direction, "snake_b_health", self.snake_a)
+
+    def _check_local_game_over(self) -> None:
+        if self.snake_a_health > 0 and self.snake_b_health > 0:
+            return
+        self.match_status     = "finished"
+        self.show_result_screen = True
+        self.result_reason    = "health_depleted"
+        self.result_scores    = {
+            self.player_a_name: self.snake_a_health,
+            self.player_b_name: self.snake_b_health,
+        }
+        if self.snake_a_health <= 0 and self.snake_b_health <= 0:
+            self.result_winner = "Draw"
+        elif self.snake_a_health <= 0:
+            self.result_winner = self.player_b_name
+        else:
+            self.result_winner = self.player_a_name
+
+    # ==================================================================
+    # Gameplay: rendering
+    # ==================================================================
+
+    def _game_to_pixel(self, col: float, row: float) -> tuple[float, float]:
+        return (
+            self.game_origin_x + col * GAME_CELL_W + GAME_CELL_W * 0.5,
+            self.game_origin_y + row * GAME_CELL_H + GAME_CELL_H * 0.5,
+        )
+
+    def _draw_game_snakes(self) -> None:
+        if self.has_authoritative_state:
+            self._update_interpolated_snakes()
+            self._draw_single_game_snake(self.render_snake_a, SNAKE_A_BODY, SNAKE_A_HEAD, SNAKE_A_GLOW)
+            self._draw_single_game_snake(self.render_snake_b, SNAKE_B_BODY, SNAKE_B_HEAD, SNAKE_B_GLOW)
+        else:
+            fa = [(float(x), float(y)) for x, y in self.snake_a]
+            fb = [(float(x), float(y)) for x, y in self.snake_b]
+            self._draw_single_game_snake(fa, SNAKE_A_BODY, SNAKE_A_HEAD, SNAKE_A_GLOW)
+            self._draw_single_game_snake(fb, SNAKE_B_BODY, SNAKE_B_HEAD, SNAKE_B_GLOW)
+
+    def _draw_single_game_snake(
+        self,
+        cells: list,
+        body_clr: tuple,
+        head_clr: tuple,
+        glow_clr: tuple,
+    ) -> None:
+        if not cells:
+            return
+        r = max(5, int(GAME_CELL_H * 0.5) - 1)   # fits inside 23.4 px cell height
+        centers = [self._game_to_pixel(x, y) for x, y in cells]
+
+        # Connecting tube drawn first so circles sit on top
+        for i in range(len(centers) - 1):
+            ax, ay = int(centers[i][0]),   int(centers[i][1])
+            bx, by = int(centers[i+1][0]), int(centers[i+1][1])
+            pygame.draw.line(self.screen, body_clr, (ax, ay), (bx, by), r * 2 - 2)
+
+        # Draw body circles tail→head
+        for i in range(len(centers) - 1, -1, -1):
+            cx, cy = int(centers[i][0]), int(centers[i][1])
+            if i == 0:
+                # Glow halo
+                gs = pygame.Surface((r * 4 + 6, r * 4 + 6), pygame.SRCALPHA)
+                pygame.draw.circle(gs, glow_clr, (r * 2 + 3, r * 2 + 3), r + 6)
+                self.screen.blit(gs, (cx - r * 2 - 3, cy - r * 2 - 3))
+                # Head
+                pygame.draw.circle(self.screen, head_clr, (cx, cy), r + 2)
+                pygame.draw.circle(self.screen, body_clr, (cx, cy), r)
+                # Eyes
+                if len(centers) > 1:
+                    ddx = centers[0][0] - centers[1][0]
+                    ddy = centers[0][1] - centers[1][1]
+                    dn  = max(0.01, (ddx * ddx + ddy * ddy) ** 0.5)
+                    ddx /= dn;  ddy /= dn
+                    px, py = -ddy, ddx
+                    for sign in (-1, 1):
+                        ex = int(cx + px * sign * (r * 0.5) + ddx * r * 0.35)
+                        ey = int(cy + py * sign * (r * 0.5) + ddy * r * 0.35)
+                        pygame.draw.circle(self.screen, (255, 255, 255), (ex, ey), max(2, r // 4))
+                        pygame.draw.circle(self.screen, (0, 0, 0),       (ex, ey), max(1, r // 7))
+            else:
+                taper = 0.55 + 0.45 * (i / len(centers))
+                cr    = max(3, int(r * taper))
+                pygame.draw.circle(self.screen, body_clr, (cx, cy), cr)
+
+    def _draw_game_pies(self) -> None:
+        ticks = pygame.time.get_ticks()
+        for col, row in self.game_pies:
+            cx, cy = self._game_to_pixel(col, row)
+            cx, cy = int(cx), int(cy)
+            pulse = 0.7 + 0.3 * math.sin(ticks / 400.0 + col * 0.7 + row * 1.3)
+            r = max(4, int(GAME_CELL_H * 0.4 - 1 + 2 * pulse))
+            # Glow
+            gs = pygame.Surface((r * 4 + 4, r * 4 + 4), pygame.SRCALPHA)
+            pygame.draw.circle(gs, (*BERRY_COLOR, int(75 * pulse)), (r * 2 + 2, r * 2 + 2), r + 5)
+            self.screen.blit(gs, (cx - r * 2 - 2, cy - r * 2 - 2))
+            # Berry body
+            pygame.draw.circle(self.screen, (25, 90, 15),   (cx, cy), r + 1)
+            pygame.draw.circle(self.screen, BERRY_COLOR,    (cx, cy), r)
+            pygame.draw.circle(self.screen, (240, 255, 200), (cx - r // 3, cy - r // 3), max(2, r // 3))
+
+    def _draw_hud(self) -> None:
+        """Minimal HUD: slim top bar + optional chat overlay."""
+
+        BAR_H  = 34
+        BAR_W  = 200   # health bar pixel width
+        MARGIN = 12
+        mid_y  = BAR_H // 2
+
+        # ── Semi-transparent top strip ──────────────────────────────
+        strip = pygame.Surface((WINDOW_WIDTH, BAR_H), pygame.SRCALPHA)
+        strip.fill((8, 10, 20, 210))
+        self.screen.blit(strip, (0, 0))
+
+        # ── Player A — left side ─────────────────────────────────────
+        a_frac = max(0.0, min(1.0, self.snake_a_health / LOCAL_INITIAL_HEALTH))
+        a_clr  = SNAKE_A_BODY if a_frac > 0.3 else HUD_DANGER
+        pygame.draw.circle(self.screen, a_clr, (MARGIN, mid_y), 5)
+        n_a = self.font_hud_sm.render(self.player_a_name[:14], True, HUD_TEXT)
+        self.screen.blit(n_a, (MARGIN + 10, mid_y - n_a.get_height() // 2))
+        bx_a = MARGIN + 10 + n_a.get_width() + 8
+        pygame.draw.rect(self.screen, (28, 34, 48), (bx_a, mid_y - 5, BAR_W, 10), border_radius=3)
+        fw_a = max(0, int(BAR_W * a_frac))
+        if fw_a:
+            pygame.draw.rect(self.screen, a_clr, (bx_a, mid_y - 5, fw_a, 10), border_radius=3)
+        hp_a = self.font_hud_sm.render(str(max(0, self.snake_a_health)), True, a_clr)
+        self.screen.blit(hp_a, (bx_a + BAR_W + 5, mid_y - hp_a.get_height() // 2))
+
+        # ── Player B — right side ────────────────────────────────────
+        b_frac = max(0.0, min(1.0, self.snake_b_health / LOCAL_INITIAL_HEALTH))
+        b_clr  = SNAKE_B_BODY if b_frac > 0.3 else HUD_DANGER
+        pygame.draw.circle(self.screen, b_clr, (WINDOW_WIDTH - MARGIN, mid_y), 5)
+        n_b = self.font_hud_sm.render(self.player_b_name[:14], True, HUD_TEXT)
+        self.screen.blit(n_b, (WINDOW_WIDTH - MARGIN - 10 - n_b.get_width(), mid_y - n_b.get_height() // 2))
+        bx_b_end = WINDOW_WIDTH - MARGIN - 10 - n_b.get_width() - 8
+        bx_b = bx_b_end - BAR_W
+        pygame.draw.rect(self.screen, (28, 34, 48), (bx_b, mid_y - 5, BAR_W, 10), border_radius=3)
+        fw_b = max(0, int(BAR_W * b_frac))
+        if fw_b:
+            pygame.draw.rect(self.screen, b_clr, (bx_b + BAR_W - fw_b, mid_y - 5, fw_b, 10), border_radius=3)
+        hp_b = self.font_hud_sm.render(str(max(0, self.snake_b_health)), True, b_clr)
+        self.screen.blit(hp_b, (bx_b - hp_b.get_width() - 5, mid_y - hp_b.get_height() // 2))
+
+        # ── Timer — centre ───────────────────────────────────────────
+        cx = WINDOW_WIDTH // 2
+        if self.has_authoritative_state and self.timer_remaining > 0:
+            t_str = f"{self.timer_remaining // 60}:{self.timer_remaining % 60:02d}"
+        elif self.active_game_id:
+            t_str = "—"
+        else:
+            t_str = "lobby"
+        t_surf = self.font_hud.render(t_str, True, HUD_ACCENT)
+        self.screen.blit(t_surf, (cx - t_surf.get_width() // 2, mid_y - t_surf.get_height() // 2))
+
+        # ── Chat overlay — bottom of screen ─────────────────────────
+        msgs = list(self.chat_messages)[-4:]
+        if msgs or self.chat_typing:
+            lines = msgs + ([f"> {self.chat_input}_"] if self.chat_typing else [])
+            ch = len(lines) * 18 + 8
+            cy_chat = WINDOW_HEIGHT - ch - 4
+            bg = pygame.Surface((620, ch), pygame.SRCALPHA)
+            bg.fill((6, 8, 16, 185))
+            self.screen.blit(bg, (self.arena_x + 8, cy_chat))
+            for i, line in enumerate(lines):
+                clr = HUD_ACCENT if (self.chat_typing and i == len(lines) - 1) else HUD_DIM
+                ls  = self.font_hud_sm.render(line[:90], True, clr)
+                self.screen.blit(ls, (self.arena_x + 14, cy_chat + 4 + i * 18))
+
+    def _draw_result_screen(self) -> None:
+        ticks = pygame.time.get_ticks()
+
+        # Semi-transparent backdrop
+        overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 6, 210))
+        self.screen.blit(overlay, (0, 0))
+
+        # Determine outcome from local player's perspective
+        win_raw = str(self.result_winner)
+        is_draw = win_raw.casefold() in {"none", "draw", "-", ""}
+        player_won = not is_draw and win_raw == self.username
+
+        if is_draw:
+            title_text = "DRAW"
+            title_clr  = (255, 215, 60)
+            accent     = (210, 180, 50)
+        elif player_won:
+            title_text = "VICTORY"
+            title_clr  = (80, 255, 130)
+            accent     = (50, 215, 90)
+        else:
+            title_text = "DEFEAT"
+            title_clr  = (255, 90, 80)
+            accent     = (200, 55, 55)
+
+        # Card
+        card_w, card_h = 580, 330
+        cx = (WINDOW_WIDTH  - card_w) // 2
+        cy = (WINDOW_HEIGHT - card_h) // 2
+        card = pygame.Rect(cx, cy, card_w, card_h)
+        pygame.draw.rect(self.screen, (8, 12, 20), card, border_radius=18)
+
+        # Animated border (gentle pulse)
+        pulse = 0.55 + 0.45 * math.sin(ticks / 480.0)
+        bc = tuple(min(255, int(c * pulse)) for c in accent)
+        pygame.draw.rect(self.screen, bc, card, width=3, border_radius=18)
+
+        mid = card.centerx
+
+        # Big outcome title
+        t_surf = self.font_result_title.render(title_text, True, title_clr)
+        self.screen.blit(t_surf, (mid - t_surf.get_width() // 2, card.y + 22))
+
+        # Thin divider
+        div_y = card.y + 96
+        pygame.draw.line(self.screen, (*accent, 80), (card.x + 50, div_y), (card.right - 50, div_y))
+
+        # Resolve health values
+        a_name = self.player_a_name
+        b_name = self.player_b_name
+        a_hp = int(self.result_scores.get(a_name, self.snake_a_health))
+        b_hp = int(self.result_scores.get(b_name, self.snake_b_health))
+
+        row_y = div_y + 20
+        left_x  = card.x + 50
+        right_x = card.right - 50
+
+        # Player A — left
+        a_name_surf = self.font_result_name.render(a_name[:16], True, HUD_HEALTH_A)
+        a_hp_clr    = HUD_HEALTH_A if a_hp > 0 else HUD_DANGER
+        a_hp_surf   = self.font_result_hp.render(f"{a_hp} HP", True, a_hp_clr)
+        self.screen.blit(a_name_surf, (left_x, row_y))
+        self.screen.blit(a_hp_surf,   (left_x, row_y + 30))
+
+        # "vs" centre
+        vs_surf = self.font_result_body.render("vs", True, HUD_DIM)
+        self.screen.blit(vs_surf, (mid - vs_surf.get_width() // 2, row_y + 16))
+
+        # Player B — right
+        b_name_surf = self.font_result_name.render(b_name[:16], True, HUD_HEALTH_B)
+        b_hp_clr    = HUD_HEALTH_B if b_hp > 0 else HUD_DANGER
+        b_hp_surf   = self.font_result_hp.render(f"{b_hp} HP", True, b_hp_clr)
+        self.screen.blit(b_name_surf, (right_x - b_name_surf.get_width(), row_y))
+        self.screen.blit(b_hp_surf,   (right_x - b_hp_surf.get_width(),   row_y + 30))
+
+        # Winner name (skipped for draw)
+        if not is_draw:
+            winner_label = self.font_result_body.render(
+                f"{win_raw} wins", True, accent)
+            self.screen.blit(winner_label, (mid - winner_label.get_width() // 2, row_y + 72))
+
+        # Hint strip
+        hint = self.font_hud_sm.render("R  return to lobby     ESC  quit", True, HUD_DIM)
+        self.screen.blit(hint, (mid - hint.get_width() // 2, card.bottom - 34))
+
+    def _launch_lobby(self) -> None:
+        try:
+            from client.gui import ArenaGuiApp
+            app = ArenaGuiApp()
+            app.server_ip_var.set(self.server_ip)
+            app.server_port_var.set(str(self.server_port))
+            app.username_var.set(self.username)
+            app._retry_same_username = True
+            app.root.after(450, app._connect)
+            app.run()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Frame composition
     # ------------------------------------------------------------------
 
     def _draw_frame(self) -> None:
-        """Render complete environment scene."""
+        """Render complete arena scene plus live gameplay entities."""
 
         # Compute frame delta-time once for any motion that needs it.
         now = pygame.time.get_ticks()
@@ -1600,12 +2475,21 @@ class PygameArenaWindow:
         self.screen.fill(SKY_BG_COLOR)
 
         self._draw_lava()
-        self._draw_snakes()          # snakes swim IN the poison, under the rocks
-        self._draw_lava_rocks()      # rocks float on top, partially hiding snakes
-        self._draw_arena_serpent()   # giant serpent in the gap, also throws blobs
-        self._draw_grid()            # tile island on top of everything
-        self._draw_obstacles()       # toxic mushrooms on arena tiles
-        self._draw_blobs()           # poison projectiles arc and land on the arena
+        self._draw_snakes()          # decorative pool snakes swim in poison
+        self._draw_lava_rocks()      # rocks float on top
+        self._draw_arena_serpent()   # giant serpent throws blobs that spawn berries
+        self._draw_grid()            # tile island
+        self._draw_obstacles()       # decorative mushrooms / skulls
+        self._draw_blobs()           # poison projectiles (also spawn game berries)
+
+        # ── Live gameplay entities ──────────────────────────────────────
+        self._draw_game_pies()       # health berries (eat to regenerate health)
+        self._draw_game_snakes()     # player snakes
+
+        # ── HUD + overlays ─────────────────────────────────────────────
+        self._draw_hud()
+        if self.show_result_screen:
+            self._draw_result_screen()
 
 
 def main(

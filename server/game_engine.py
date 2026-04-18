@@ -39,6 +39,18 @@ SELF_COLLISION_DAMAGE = 20
 HEAD_TO_HEAD_DAMAGE = 25
 MAX_MATCH_TICKS = 300
 
+# Visual island layout — must mirror client/game_window.py metrics.
+# The board's top (rows 0-6) is the castle-extension / serpent gap above the island.
+# Rows 7-18 (cols 1-18) are the playable island surface.
+ISLAND_ROW_MIN = 7   # ceil(SIDE_EXTENSION_ROWS * TILE_SIZE / GAME_CELL_H) = ceil(6.15)
+ISLAND_COL_MIN = 1
+ISLAND_COL_MAX = 18  # exclusive upper bound is 19 (BOARD_WIDTH - 1)
+ISLAND_ROW_MAX = 18  # exclusive upper bound is 19 (BOARD_HEIGHT - 1)
+# Centre-top gap (the serpent's domain above the island): block snake entry.
+GAP_COL_START = 5
+GAP_COL_END   = 15
+GAP_ROW_END   = 7
+
 # Static obstacle layout (fixed coordinates as requested).
 STATIC_OBSTACLES: tuple[tuple[int, int], ...] = (
     (9, 7),
@@ -132,7 +144,8 @@ def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRun
         pies={},
         lockstep_moves={player_a: False, player_b: False},
     )
-    _spawn_next_pie(runtime)
+    # Pies are not auto-spawned: they are only created when the arena serpent's
+    # poison blob lands on the island (client drives this via blob-landing events).
     return runtime
 
 
@@ -205,7 +218,10 @@ def step_runtime(runtime: MatchRuntime) -> None:
 
         next_head = planned_heads[player]
         x, y = next_head
-        if x < 0 or y < 0 or x >= runtime.width or y >= runtime.height:
+        out_of_board = x < 0 or y < 0 or x >= runtime.width or y >= runtime.height
+        # Block the centre-top gap (serpent zone) — wings at rows 0-6 cols 0-4, 15-19 stay valid.
+        in_gap = GAP_COL_START <= x < GAP_COL_END and y < GAP_ROW_END
+        if out_of_board or in_gap:
             collision_penalties[player] += WALL_COLLISION_DAMAGE
         if next_head in runtime.obstacles:
             obstacle_damage = int(runtime.obstacles[next_head].get("damage", WALL_COLLISION_DAMAGE))
@@ -262,8 +278,8 @@ def step_runtime(runtime: MatchRuntime) -> None:
 
         snake.alive = snake.health > 0
 
-    if ate_pie or not runtime.pies:
-        _spawn_next_pie(runtime)
+    # No auto-refill: pies arrive only from serpent-blob landings (client-driven).
+    _ = ate_pie  # retained for potential future scoring hooks
 
     _update_match_status(runtime)
 
@@ -342,8 +358,8 @@ def _spawn_next_pie(runtime: MatchRuntime) -> None:
 
     pie_template = PIE_TYPES[(runtime.pie_counter - 1) % len(PIE_TYPES)]
 
-    for y in range(runtime.height):
-        for x in range(runtime.width):
+    for y in range(ISLAND_ROW_MIN, ISLAND_ROW_MAX + 1):
+        for x in range(ISLAND_COL_MIN, ISLAND_COL_MAX + 1):
             if (x, y) not in occupied:
                 runtime.pies = {(x, y): dict(pie_template)}
                 runtime.pie_counter += 1
