@@ -154,6 +154,8 @@ def _handle_invitation_message(
                         send_message(sock, game_state_message)
                     except OSError:
                         continue
+            # Match assignment changes idle/active lobby state for everyone.
+            broadcast_online_users(server_state)
             return
 
     if action == "quick_cancel":
@@ -368,6 +370,8 @@ def _handle_invitation_message(
                         send_message(sock, game_state_message)
                     except OSError:
                         continue
+            # Match assignment changes idle/active lobby state for everyone.
+            broadcast_online_users(server_state)
         return
 
     if action == "handoff":
@@ -499,6 +503,8 @@ def _handle_movement_message(
                 send_message(sock, game_over_message)
             except OSError:
                 continue
+        # Match teardown moves users back to idle; refresh lobby metadata.
+        broadcast_online_users(server_state)
 
 
 def _handle_chat_message(
@@ -728,7 +734,13 @@ def handle_client_connection(
         send_message(client_socket, make_connect_message(client_id=client_id, client_version="server-1.0"))
 
         while True:
-            data = client_socket.recv(4096)
+            try:
+                data = client_socket.recv(4096)
+            except (ConnectionResetError, ConnectionAbortedError, OSError) as error:
+                # Treat transport-level socket resets as normal disconnects.
+                # Common on Windows when clients close quickly (WinError 10054).
+                print(f"[CLIENT] Disconnected (socket error): {client_address} ({client_id}) - {error}")
+                break
             if not data:
                 print(f"[CLIENT] Disconnected: {client_address} ({client_id})")
                 break

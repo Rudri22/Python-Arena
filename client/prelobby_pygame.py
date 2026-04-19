@@ -36,6 +36,14 @@ from shared.protocol import (
     sanitize_skin,
     skin_to_dict,
 )
+from client.controls_config import (
+    DEFAULT_DIRECTION_BINDINGS,
+    DIRECTION_ACTIONS,
+    display_key_name,
+    load_direction_bindings,
+    normalize_key_name,
+    save_direction_bindings,
+)
 
 """
 Python-Arena Prelobby + Lobby (single-file feature map)
@@ -1432,6 +1440,7 @@ class PygameLobbyScene:
         self.online_name_by_cf: dict[str, str] = {}
         self.user_session_by_cf: dict[str, int] = {}
         self.idle_users: set[str] = set()
+        self.active_players_count = 0
         self.selected_index = -1
         self.logs: list[str] = []
         self.chat_bubbles: list[tuple[str, str, bool]] = []
@@ -1470,11 +1479,23 @@ class PygameLobbyScene:
         self._last_invite_target: str | None = None
         self.start_game = False
         self.start_game_opponent: str | None = None
+        self.start_game_as_spectator = False
+        self.pending_lobby_spectate_target: str | None = None
+        self._online_shrink_candidate: set[str] = set()
+        self._online_shrink_started_ms = 0
         self._username_retry_count = 0
         self._username_retry_max = 12
         self._next_username_retry_ms = 0
         self.quick_match_waiting = False
         self._next_quick_match_ping_ms = 0
+        self.controls_popup_open = False
+        self.controls_waiting_action: str | None = None
+        self.controls_saved_bindings = load_direction_bindings()
+        self.controls_bindings = dict(self.controls_saved_bindings)
+        self.controls_feedback = ""
+        self.controls_feedback_until_ms = 0
+        self.controls_key_tile = self._load_input_prompt_asset("Tiles (White)/tile_0051.png")
+        self.controls_listen_tile = self._load_input_prompt_asset("Tiles (White)/tile_0066.png")
 
         self._connect()
 
@@ -1484,6 +1505,15 @@ class PygameLobbyScene:
             return None
         try:
             return pygame.image.load(str(icon_path)).convert_alpha()
+        except pygame.error:
+            return None
+
+    def _load_input_prompt_asset(self, relative_path: str) -> pygame.Surface | None:
+        asset_path = Path(__file__).resolve().parent / "assets" / "input_prompts" / relative_path
+        if not asset_path.exists():
+            return None
+        try:
+            return pygame.image.load(str(asset_path)).convert_alpha()
         except pygame.error:
             return None
 
@@ -1635,6 +1665,11 @@ class PygameLobbyScene:
             self._append_log(f"[ERROR] Username retry failed: {error}")
 
     def _retry_quick_match_if_due(self) -> None:
+        quick_label, _ = self._quick_action_state()
+        if quick_label != "QUICK MATCH":
+            self.quick_match_waiting = False
+            self._next_quick_match_ping_ms = 0
+            return
         if not self.quick_match_waiting:
             return
         if self.connection is None:
@@ -1711,6 +1746,33 @@ class PygameLobbyScene:
             return
         if msg_type == MessageType.ONLINE_USERS.value:
             new_online_users = list(payload.get("users", []))
+            idle_payload = payload.get("idle_users", [])
+            new_idle_users = {str(u) for u in idle_payload if isinstance(u, str)}
+            try:
+                new_active_players_count = int(payload.get("active_players", 0))
+            except (TypeError, ValueError):
+                new_active_players_count = 0
+
+            # Debounce transient roster shrink during match start handoff so
+            # leaderboard/player list does not flicker (disappear/reappear).
+            current_online_cf = set(self.online_name_by_cf.keys())
+            incoming_online_cf = {str(u).casefold() for u in new_online_users}
+            if len(incoming_online_cf) < len(current_online_cf) and new_active_players_count >= 2:
+                missing_cf = current_online_cf - incoming_online_cf
+                now_ms = pygame.time.get_ticks()
+                if missing_cf != self._online_shrink_candidate:
+                    self._online_shrink_candidate = set(missing_cf)
+                    self._online_shrink_started_ms = now_ms
+                if now_ms - self._online_shrink_started_ms < 1400:
+                    # Keep existing visual roster while still consuming latest
+                    # idle/active counters for button-state correctness.
+                    self.idle_users = new_idle_users
+                    self.active_players_count = new_active_players_count
+                    return
+            else:
+                self._online_shrink_candidate = set()
+                self._online_shrink_started_ms = 0
+
             new_name_by_cf = {u.casefold(): u for u in new_online_users}
             previous_name_by_cf = dict(self.online_name_by_cf)
             sessions_payload = payload.get("user_sessions", {})
@@ -1723,12 +1785,8 @@ class PygameLobbyScene:
                     except (TypeError, ValueError):
                         current_session_by_cf[user.casefold()] = 0
 
-            # Users who left are removed from leaderboard state.
-            departed_cfs = set(previous_name_by_cf) - set(new_name_by_cf)
-            for cf in departed_cfs:
-                self.wins_by_user_cf.pop(cf, None)
-                self.join_order_cf.pop(cf, None)
-                self.user_session_by_cf.pop(cf, None)
+            # Keep leaderboard sticky across lobby->game handoff churn:
+            # once a user appears in this session, keep their leaderboard row.
 
             # New joiners OR same user with new session => reset wins.
             # Tie-break order comes from server session version so all clients
@@ -1739,27 +1797,53 @@ class PygameLobbyScene:
                 if cf not in previous_name_by_cf or (old_session is not None and new_session != old_session):
                     self.wins_by_user_cf[cf] = 0
 
-            # Keep existing users' scores; normalize maps to current online set.
-            self.wins_by_user_cf = {cf: self.wins_by_user_cf.get(cf, 0) for cf in new_name_by_cf}
-            self.user_session_by_cf = {cf: current_session_by_cf.get(cf, 0) for cf in new_name_by_cf}
-            # Use session version as global join-order/tie-break (smaller = earlier).
-            self.join_order_cf = {cf: self.user_session_by_cf.get(cf, 0) for cf in new_name_by_cf}
-            self.online_name_by_cf = new_name_by_cf
+            # Update maps for currently online users, but do not drop prior
+            # leaderboard users when payload temporarily shrinks.
+            for cf in new_name_by_cf:
+                self.wins_by_user_cf[cf] = self.wins_by_user_cf.get(cf, 0)
+                self.user_session_by_cf[cf] = current_session_by_cf.get(cf, self.user_session_by_cf.get(cf, 0))
+                if cf not in self.join_order_cf:
+                    self.join_order_cf[cf] = self.user_session_by_cf.get(cf, 0)
+                self.online_name_by_cf[cf] = new_name_by_cf[cf]
             self.online_users = new_online_users
-            idle_payload = payload.get("idle_users", [])
-            self.idle_users = {str(u) for u in idle_payload if isinstance(u, str)}
-            if self.selected_index >= len(self.online_users):
+            self.idle_users = new_idle_users
+            self.active_players_count = new_active_players_count
+            if self._quick_action_state()[0] != "QUICK MATCH":
+                self.quick_match_waiting = False
+                self._next_quick_match_ping_ms = 0
+            lobby_users = self._lobby_online_users()
+            if self.selected_index >= len(lobby_users):
                 self.selected_index = -1
+            max_players_scroll = max(0, len(lobby_users) - self._players_visible_count())
+            self.players_scroll = min(self.players_scroll, max_players_scroll)
             online_casefold = {u.casefold() for u in self.online_users}
             self.pending_invites = [u for u in self.pending_invites if u.casefold() in online_casefold]
             max_pending_scroll = max(0, len(self.pending_invites) - self._incoming_invites_visible_count())
             self.pending_invites_scroll = min(self.pending_invites_scroll, max_pending_scroll)
+            if self._should_block_incoming_invites():
+                self.pending_invites.clear()
+                self.pending_invite_from = None
+                self.pending_invites_scroll = 0
             return
         if msg_type == MessageType.INVITATION.value:
             action = str(payload.get("action", "")).lower()
             from_user = str(payload.get("from_user", ""))
             to_user = str(payload.get("to_user", ""))
             if action == "send" and to_user.casefold() == self.username.casefold():
+                if self._should_block_incoming_invites(from_user) and self.connection is not None:
+                    try:
+                        self.connection.send_message(
+                            make_invitation_message(
+                                from_user=from_user,
+                                to_user=self.username,
+                                action="decline",
+                            )
+                        )
+                    except OSError:
+                        pass
+                    self.pending_invites = [name for name in self.pending_invites if name.casefold() != from_user.casefold()]
+                    self.pending_invite_from = self.pending_invites[0] if self.pending_invites else None
+                    return
                 self.pending_invite_from = from_user
                 if from_user and from_user not in self.pending_invites:
                     self.pending_invites.append(from_user)
@@ -1777,8 +1861,12 @@ class PygameLobbyScene:
                         max_scroll = max(0, len(self.pending_invites) - self._incoming_invites_visible_count())
                         self.pending_invites_scroll = min(self.pending_invites_scroll, max_scroll)
                         self.pending_invite_from = self.pending_invites[0] if self.pending_invites else None
-                self._append_log(f"[INVITE] {payload}")
+                if not (to_user.casefold() == self.username.casefold() and self._should_block_incoming_invites(from_user)):
+                    self._append_log(f"[INVITE] {payload}")
             elif action == "match_started":
+                if not self._match_event_targets_self(payload):
+                    self._append_log("[MATCH] Ignored unrelated match_started event.")
+                    return
                 self.quick_match_waiting = False
                 self._next_quick_match_ping_ms = 0
                 game_id = payload.get("game_id", "unknown")
@@ -1789,9 +1877,20 @@ class PygameLobbyScene:
                 opponent = self._extract_opponent_from_match(payload)
                 if opponent:
                     self._remove_outgoing_pending(opponent)
+                self.pending_lobby_spectate_target = None
                 self.start_game_opponent = opponent
+                self.start_game_as_spectator = False
                 self.start_game = True
                 self.running = False
+            elif action == "spectate_joined" and to_user.casefold() == self.username.casefold():
+                target = self.pending_lobby_spectate_target
+                self.pending_lobby_spectate_target = None
+                self.start_game_opponent = target
+                self.start_game_as_spectator = True
+                self.start_game = True
+                self.running = False
+            elif action == "spectate_left" and to_user.casefold() == self.username.casefold():
+                self.pending_lobby_spectate_target = None
             elif action == "quick_cancelled" and to_user.casefold() == self.username.casefold():
                 self.quick_match_waiting = False
                 self._next_quick_match_ping_ms = 0
@@ -1839,6 +1938,9 @@ class PygameLobbyScene:
         if msg_type == MessageType.ERROR.value:
             error_message = str(payload.get("message", "Unknown error"))
             self._append_log(f"[ERROR] {error_message}")
+            low_error = error_message.casefold()
+            if "spectate" in low_error or "spectator" in low_error:
+                self.pending_lobby_spectate_target = None
             if "quick match" in error_message.casefold() or "invitation action failed" in error_message.casefold():
                 self.quick_match_waiting = False
             if "username already taken" in error_message.casefold():
@@ -1870,10 +1972,24 @@ class PygameLobbyScene:
                 return candidate
         return None
 
+    def _match_event_targets_self(self, payload: dict[str, Any]) -> bool:
+        me = self.username.casefold()
+        from_user = str(payload.get("from_user", "")).casefold()
+        to_user = str(payload.get("to_user", "")).casefold()
+        if from_user == me or to_user == me:
+            return True
+        players = payload.get("players")
+        if isinstance(players, list):
+            for player in players:
+                if str(player).casefold() == me:
+                    return True
+        return False
+
     def _selected_opponent(self) -> str | None:
-        if self.selected_index < 0 or self.selected_index >= len(self.online_users):
+        lobby_users = self._lobby_online_users()
+        if self.selected_index < 0 or self.selected_index >= len(lobby_users):
             return None
-        selected = self.online_users[self.selected_index]
+        selected = lobby_users[self.selected_index]
         if selected.casefold() == self.username.casefold():
             return None
         return selected
@@ -2180,6 +2296,10 @@ class PygameLobbyScene:
         players = self._right_rect()
         return pygame.Rect(players.x + 10, players.y + 44, players.width - 20, max(0, players.height - 52))
 
+    def _lobby_online_users(self) -> list[str]:
+        idle_casefold = {u.casefold() for u in self.idle_users}
+        return [u for u in self.online_users if u.casefold() in idle_casefold]
+
     def _players_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
         area = self._players_list_area_rect()
         bar = pygame.Rect(area.right - 16, area.y + 4, 14, max(20, area.height - 8))
@@ -2189,7 +2309,7 @@ class PygameLobbyScene:
         return up, down, track
 
     def _players_scroll_thumb_rect(self) -> pygame.Rect | None:
-        total = len(self.online_users)
+        total = len(self._lobby_online_users())
         visible = self._players_visible_count()
         if total <= visible or not self.players_expanded:
             return None
@@ -2205,7 +2325,7 @@ class PygameLobbyScene:
         travel = max(1, track.height - thumb_h)
         clamped_y = min(max(track.y, thumb_y), track.y + travel)
         ratio = (clamped_y - track.y) / travel
-        max_scroll = max(0, len(self.online_users) - self._players_visible_count())
+        max_scroll = max(0, len(self._lobby_online_users()) - self._players_visible_count())
         self.players_scroll = int(round(ratio * max_scroll))
 
     def _update_ui_animations(self) -> None:
@@ -2226,6 +2346,11 @@ class PygameLobbyScene:
     def _quick_match_rect(self) -> pygame.Rect:
         left_panel = self._left_panel_rect()
         w = 244
+        return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 154, w, 40)
+
+    def _controls_button_rect(self) -> pygame.Rect:
+        left_panel = self._left_panel_rect()
+        w = 244
         return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 106, w, 40)
 
     def _quick_match_cancel_rect(self) -> pygame.Rect:
@@ -2238,6 +2363,131 @@ class PygameLobbyScene:
         left_panel = self._left_panel_rect()
         w = 244
         return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 58, w, 40)
+
+    def _controls_popup_rect(self) -> pygame.Rect:
+        width = min(640, self.w - 100)
+        height = min(440, self.h - 90)
+        return pygame.Rect((self.w - width) // 2, (self.h - height) // 2, width, height)
+
+    def _controls_actions(self) -> tuple[tuple[str, str], ...]:
+        return (("up", "Up"), ("left", "Left"), ("down", "Down"), ("right", "Right"))
+
+    def _controls_bind_rect(self, action: str) -> pygame.Rect:
+        popup = self._controls_popup_rect()
+        action_index = {name: idx for idx, (name, _) in enumerate(self._controls_actions())}
+        idx = action_index[action]
+        row_h = 58
+        start_y = popup.y + 118
+        return pygame.Rect(popup.x + popup.width - 252, start_y + idx * row_h, 190, 40)
+
+    def _controls_close_button_rect(self) -> pygame.Rect:
+        popup = self._controls_popup_rect()
+        return pygame.Rect(popup.right - 144, popup.bottom - 58, 112, 34)
+
+    def _controls_save_button_rect(self) -> pygame.Rect:
+        popup = self._controls_popup_rect()
+        return pygame.Rect(popup.x + 32, popup.bottom - 58, 148, 34)
+
+    def _controls_reset_button_rect(self) -> pygame.Rect:
+        popup = self._controls_popup_rect()
+        return pygame.Rect(popup.x + 194, popup.bottom - 58, 166, 34)
+
+    def _controls_keycap_label(self, key_name: str, waiting: bool) -> str:
+        if waiting:
+            return "..."
+        normalized = normalize_key_name(key_name)
+        compact = {
+            "up": "UP",
+            "down": "DN",
+            "left": "LT",
+            "right": "RT",
+            "space": "SP",
+            "return": "EN",
+            "escape": "ES",
+            "comma": ",",
+            "period": ".",
+            "slash": "/",
+        }
+        if normalized in compact:
+            return compact[normalized]
+        if len(normalized) == 1:
+            return normalized.upper()
+        pretty = display_key_name(normalized).replace(" ", "")
+        if len(pretty) <= 3:
+            return pretty.upper()
+        return pretty[:3].upper()
+
+    def _show_controls_feedback(self, message: str, duration_ms: int = 1800) -> None:
+        self.controls_feedback = message
+        self.controls_feedback_until_ms = pygame.time.get_ticks() + duration_ms
+
+    def _set_controls_binding(self, action: str, key_name: str) -> None:
+        key_name = normalize_key_name(key_name)
+        if not key_name:
+            self._show_controls_feedback("Invalid key.")
+            return
+        if key_name == "escape":
+            self._show_controls_feedback("Esc is reserved for cancel/back.")
+            return
+        current_key = self.controls_bindings.get(action)
+        if current_key == key_name:
+            self._show_controls_feedback("Key already assigned.")
+            return
+
+        conflict_action: str | None = None
+        for other_action in DIRECTION_ACTIONS:
+            if other_action == action:
+                continue
+            if self.controls_bindings.get(other_action) == key_name:
+                conflict_action = other_action
+                break
+
+        if conflict_action is not None and current_key:
+            self.controls_bindings[conflict_action] = current_key
+            self._show_controls_feedback(
+                f"Swapped {action.title()} with {conflict_action.title()}.",
+                duration_ms=2200,
+            )
+        else:
+            self._show_controls_feedback(f"{action.title()} set to {display_key_name(key_name)}.")
+
+        self.controls_bindings[action] = key_name
+        self.controls_waiting_action = None
+
+    def _handle_controls_mouse(self, pos: tuple[int, int]) -> None:
+        popup = self._controls_popup_rect()
+        if self.controls_waiting_action is not None:
+            if not popup.collidepoint(pos):
+                self._show_controls_feedback("Press a key or Esc to cancel.")
+            return
+
+        if not popup.collidepoint(pos):
+            self.controls_bindings = dict(self.controls_saved_bindings)
+            self.controls_waiting_action = None
+            self.controls_popup_open = False
+            return
+
+        if self._controls_close_button_rect().collidepoint(pos):
+            self.controls_bindings = dict(self.controls_saved_bindings)
+            self.controls_waiting_action = None
+            self.controls_popup_open = False
+            return
+        if self._controls_save_button_rect().collidepoint(pos):
+            save_direction_bindings(self.controls_bindings)
+            self.controls_saved_bindings = dict(self.controls_bindings)
+            self._show_controls_feedback("Controls saved.", duration_ms=1400)
+            return
+        if self._controls_reset_button_rect().collidepoint(pos):
+            self.controls_bindings = dict(DEFAULT_DIRECTION_BINDINGS)
+            self.controls_waiting_action = None
+            self._show_controls_feedback("Controls reset to default.", duration_ms=2200)
+            return
+
+        for action, _label in self._controls_actions():
+            if self._controls_bind_rect(action).collidepoint(pos):
+                self.controls_waiting_action = action
+                self._show_controls_feedback(f"Listening for {action.title()}...", duration_ms=1300)
+                return
 
     def _invite_by_name_rect(self) -> pygame.Rect:
         invites = self._center_top_rect()
@@ -2292,7 +2542,7 @@ class PygameLobbyScene:
         area = self._players_list_area_rect()
         players_y = area.y
         row_h = self._players_row_height()
-        reserve = 22 if len(self.online_users) > self._players_visible_count() else 0
+        reserve = 22 if len(self._lobby_online_users()) > self._players_visible_count() else 0
         return pygame.Rect(area.x, players_y + visible_index * row_h, area.width - reserve, row_h - 6)
 
     def _player_eye_rect(self, row: pygame.Rect) -> pygame.Rect:
@@ -2301,9 +2551,65 @@ class PygameLobbyScene:
     def _start_spectate(self, target_user: str) -> None:
         if not target_user or target_user.casefold() == self.username.casefold():
             return
-        self.start_game_opponent = target_user
-        self.start_game = True
-        self.running = False
+        if self.connection is None:
+            self._append_log("[ERROR] Not connected. Cannot spectate.")
+            return
+        if self.pending_lobby_spectate_target is not None:
+            return
+        try:
+            self.connection.send_message(
+                make_invitation_message(
+                    from_user=self.username,
+                    to_user=target_user,
+                    action="spectate",
+                )
+            )
+            self.pending_lobby_spectate_target = target_user
+            self._append_log(f"[MATCH] Requesting spectate for {target_user}...")
+        except OSError as error:
+            self._append_log(f"[ERROR] Spectate request failed: {error}")
+
+    def _should_block_incoming_invites(self, from_user: str | None = None) -> bool:
+        if from_user:
+            idle_casefold = {u.casefold() for u in self.idle_users}
+            if from_user.casefold() not in idle_casefold:
+                return True
+        quick_label, _ = self._quick_action_state()
+        return quick_label == "SPECTATE" or self.pending_lobby_spectate_target is not None
+
+    def _quick_action_state(self) -> tuple[str, str | None]:
+        """
+        Decide whether the primary left-panel action should be QUICK MATCH or SPECTATE.
+
+        Requirement:
+        - If two users are already in a live game and a third user is idle in lobby,
+          show SPECTATE for that third user.
+        - Otherwise keep QUICK MATCH.
+        """
+
+        idle_casefold = {u.casefold() for u in self.idle_users}
+        non_idle_users = [
+            user for user in self.online_users
+            if user.casefold() != self.username.casefold() and user.casefold() not in idle_casefold
+        ]
+        online_casefold = {u.casefold() for u in self.online_users}
+        self_is_idle = (
+            self.username.casefold() in idle_casefold
+            or self.username.casefold() not in online_casefold
+        )
+
+        # Exactly the "third player while two are in-game" scenario.
+        # Rely primarily on server-reported active player count to avoid local
+        # state drift causing accidental QUICK MATCH/INVITE behavior.
+        if self_is_idle and self.active_players_count >= 2:
+            selected = self._selected_opponent()
+            if selected is not None and selected in non_idle_users:
+                return "SPECTATE", selected
+            if non_idle_users:
+                return "SPECTATE", non_idle_users[0]
+            return "SPECTATE", None
+
+        return "QUICK MATCH", None
 
     def _outgoing_pending_strip_rect(self) -> pygame.Rect:
         invites = self._center_top_rect()
@@ -2563,6 +2869,9 @@ class PygameLobbyScene:
         if self.skin_modal_open:
             self._handle_skin_modal_click(pos)
             return
+        if self.controls_popup_open:
+            self._handle_controls_mouse(pos)
+            return
         if self.player_popup_target is not None:
             if self._player_popup_invite_rect().collidepoint(pos):
                 if not self._has_outgoing_pending() and not self.quick_match_waiting:
@@ -2629,7 +2938,7 @@ class PygameLobbyScene:
                 self.chat_scroll = max(0, self.chat_scroll - 1)
                 return
 
-        if self.players_expanded and len(self.online_users) > self._players_visible_count():
+        if self.players_expanded and len(self._lobby_online_users()) > self._players_visible_count():
             up, down, _ = self._players_scrollbar_parts()
             thumb = self._players_scroll_thumb_rect()
             if thumb is not None and thumb.collidepoint(pos):
@@ -2640,7 +2949,7 @@ class PygameLobbyScene:
                 self.players_scroll = max(0, self.players_scroll - 1)
                 return
             if down.collidepoint(pos):
-                max_scroll = max(0, len(self.online_users) - self._players_visible_count())
+                max_scroll = max(0, len(self._lobby_online_users()) - self._players_visible_count())
                 self.players_scroll = min(max_scroll, self.players_scroll + 1)
                 return
 
@@ -2680,27 +2989,46 @@ class PygameLobbyScene:
                 self._send_chat()
             return
         if self._quick_match_rect().collidepoint(pos):
-            if self.connection is not None:
-                try:
-                    self.connection.send_message(
-                        make_invitation_message(
-                            from_user=self.username,
-                            to_user=self.username,
-                            action="quick_match",
-                        )
-                    )
-                    # Immediate UX feedback; server responses can still refine/reset.
-                    self.quick_match_waiting = True
-                    self._next_quick_match_ping_ms = pygame.time.get_ticks() + 1200
-                    self._append_log("[MATCH] Quick Match requested. Waiting for player...")
-                except OSError as error:
+            action_label, spectate_target = self._quick_action_state()
+            if action_label == "SPECTATE":
+                if spectate_target is None:
+                    self._append_log("[MATCH] No active match available to spectate right now.")
+                else:
+                    self._append_log(f"[MATCH] Spectating {spectate_target}...")
+                    self._start_spectate(spectate_target)
+            else:
+                if self.active_players_count >= 2:
+                    # Safety guard: never send quick-match while lobby indicates
+                    # active match occupancy.
                     self.quick_match_waiting = False
                     self._next_quick_match_ping_ms = 0
-                    self._append_log(f"[ERROR] Quick Match request failed: {error}")
-            else:
-                self.quick_match_waiting = False
-                self._next_quick_match_ping_ms = 0
-                self._append_log("[ERROR] Not connected to server. Quick Match unavailable.")
+                    return
+                if self.connection is not None:
+                    try:
+                        self.connection.send_message(
+                            make_invitation_message(
+                                from_user=self.username,
+                                to_user=self.username,
+                                action="quick_match",
+                            )
+                        )
+                        # Immediate UX feedback; server responses can still refine/reset.
+                        self.quick_match_waiting = True
+                        self._next_quick_match_ping_ms = pygame.time.get_ticks() + 1200
+                        self._append_log("[MATCH] Quick Match requested. Waiting for player...")
+                    except OSError as error:
+                        self.quick_match_waiting = False
+                        self._next_quick_match_ping_ms = 0
+                        self._append_log(f"[ERROR] Quick Match request failed: {error}")
+                else:
+                    self.quick_match_waiting = False
+                    self._next_quick_match_ping_ms = 0
+                    self._append_log("[ERROR] Not connected to server. Quick Match unavailable.")
+            return
+        if self._controls_button_rect().collidepoint(pos):
+            self.controls_bindings = dict(self.controls_saved_bindings)
+            self.controls_popup_open = True
+            self.controls_waiting_action = None
             return
         if self._chat_target_rect().collidepoint(pos):
             self.chat_target_open = not self.chat_target_open
@@ -2731,12 +3059,13 @@ class PygameLobbyScene:
             self.players_expanded = not self.players_expanded
             return
         if self.players_expand_t > 0.85 and right.collidepoint(pos):
+            lobby_users = self._lobby_online_users()
             row_h = self._players_row_height()
             visible_idx = (pos[1] - (right.y + 44)) // row_h
             idx = self.players_scroll + visible_idx
-            if 0 <= idx < len(self.online_users) and 0 <= visible_idx < self._players_visible_count():
+            if 0 <= idx < len(lobby_users) and 0 <= visible_idx < self._players_visible_count():
                 row = self._player_row_rect(int(visible_idx))
-                selected = self.online_users[int(idx)]
+                selected = lobby_users[int(idx)]
                 if selected.casefold() != self.username.casefold():
                     eye_rect = self._player_eye_rect(row)
                     if selected not in self.idle_users and eye_rect.collidepoint(pos):
@@ -2757,6 +3086,9 @@ class PygameLobbyScene:
                 self.h = max(620, event.h)
                 self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self.controls_popup_open:
+                    self._handle_controls_mouse(event.pos)
+                    continue
                 self._handle_mouse(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self.pending_invites_dragging = False
@@ -2784,6 +3116,8 @@ class PygameLobbyScene:
                         thumb.height,
                     )
             elif event.type == pygame.MOUSEWHEEL:
+                if self.controls_popup_open:
+                    continue
                 mx, my = pygame.mouse.get_pos()
                 users = self._users_rect()
                 right = self._right_rect()
@@ -2792,7 +3126,7 @@ class PygameLobbyScene:
                     max_scroll = max(0, len(ranked) - 10)
                     self.leaderboard_scroll = min(max(0, self.leaderboard_scroll - event.y), max_scroll)
                 elif self.players_expand_t > 0.85 and right.collidepoint((mx, my)):
-                    max_scroll = max(0, len(self.online_users) - self._players_visible_count())
+                    max_scroll = max(0, len(self._lobby_online_users()) - self._players_visible_count())
                     self.players_scroll = min(max(0, self.players_scroll - event.y), max_scroll)
                 elif self._incoming_invites_area_rect().collidepoint((mx, my)):
                     max_scroll = max(0, len(self.pending_invites) - self._incoming_invites_visible_count())
@@ -2806,6 +3140,23 @@ class PygameLobbyScene:
                     max_scroll = max(0, len(options) - self._chat_target_visible_count())
                     self.chat_target_scroll = min(max(0, self.chat_target_scroll - event.y), max_scroll)
             elif event.type == pygame.KEYDOWN:
+                if self.controls_popup_open:
+                    if self.controls_waiting_action is not None:
+                        if event.key == pygame.K_ESCAPE:
+                            self.controls_waiting_action = None
+                            self._show_controls_feedback("Rebind cancelled.", duration_ms=1200)
+                            continue
+                        if event.key == pygame.K_UNKNOWN:
+                            continue
+                        key_name = normalize_key_name(pygame.key.name(event.key))
+                        self._set_controls_binding(self.controls_waiting_action, key_name)
+                        continue
+                    if event.key == pygame.K_ESCAPE:
+                        self.controls_bindings = dict(self.controls_saved_bindings)
+                        self.controls_waiting_action = None
+                        self.controls_popup_open = False
+                        continue
+                    continue
                 if event.key == pygame.K_ESCAPE:
                     if self.skin_modal_open:
                         self._close_skin_modal(commit=False)
@@ -2865,8 +3216,7 @@ class PygameLobbyScene:
 
     def _ranked_players(self) -> list[tuple[str, int]]:
         ranked = []
-        for user in self.online_users:
-            cf = user.casefold()
+        for cf, user in self.online_name_by_cf.items():
             ranked.append((user, int(self.wins_by_user_cf.get(cf, 0)), int(self.join_order_cf.get(cf, 10**9))))
         ranked.sort(key=lambda item: (-item[1], item[2]))
         ranked = [(user, wins) for user, wins, _order in ranked]
@@ -3207,7 +3557,7 @@ class PygameLobbyScene:
         header = self._online_header_rect()
         pygame.draw.rect(frame, (10, 30, 48), header, border_radius=10)
         pygame.draw.rect(frame, (72, 232, 160), header, 1, border_radius=10)
-        online_title = self.font_body.render(f"ONLINE PLAYERS - {len(self.online_users)}", True, (82, 232, 208))
+        online_title = self.font_body.render(f"ONLINE PLAYERS - {len(self._lobby_online_users())}", True, (82, 232, 208))
         # center the title a bit more while leaving space for the chevron
         title_x = header.x + ((header.width - 34) - online_title.get_width()) // 2 + 8
         frame.blit(online_title, (title_x, players.y + 12))
@@ -3469,8 +3819,9 @@ class PygameLobbyScene:
                 pygame.draw.rect(frame, (122, 156, 192), thumb, border_radius=4)
 
         if self.players_expand_t > 0.25:
+            lobby_users = self._lobby_online_users()
             visible_players = self._players_visible_count()
-            shown_players = self.online_users[self.players_scroll : self.players_scroll + visible_players]
+            shown_players = lobby_users[self.players_scroll : self.players_scroll + visible_players]
             for i, user in enumerate(shown_players):
                 idx = self.players_scroll + i
                 row = self._player_row_rect(i)
@@ -3492,7 +3843,7 @@ class PygameLobbyScene:
                         pygame.draw.ellipse(frame, (132, 232, 174), eye_rect, 2)
                         pupil = pygame.Rect(eye_rect.x + 7, eye_rect.y + 5, 4, 8)
                         pygame.draw.ellipse(frame, (132, 232, 174), pupil)
-            if len(self.online_users) > visible_players:
+            if len(lobby_users) > visible_players:
                 up, down, track = self._players_scrollbar_parts()
                 pygame.draw.rect(frame, (22, 44, 70), up, border_radius=4)
                 pygame.draw.rect(frame, (22, 44, 70), down, border_radius=4)
@@ -3520,7 +3871,10 @@ class PygameLobbyScene:
             enabled=can_invite_by_name,
             glow=can_invite_by_name,
         )
-        self._draw_button(self._quick_match_rect(), "QUICK MATCH", accent=(72, 236, 160), glow=True)
+        quick_action_label, _quick_action_target = self._quick_action_state()
+        quick_action_accent = (72, 236, 160) if quick_action_label == "QUICK MATCH" else (92, 186, 246)
+        self._draw_button(self._quick_match_rect(), quick_action_label, accent=quick_action_accent, glow=True)
+        self._draw_button(self._controls_button_rect(), "CONTROLS", accent=(212, 224, 236), glow=True)
         self._draw_button(self._disconnect_button_rect(), "QUIT GAME", accent=(238, 96, 108), glow=True)
         chat_rect = self._chat_rect()
         pygame.draw.rect(self.screen, (22, 42, 66), chat_rect, border_radius=12)
@@ -3607,9 +3961,65 @@ class PygameLobbyScene:
             self._draw_button(self._player_popup_close_rect(), "Close", accent=(236, 132, 132))
         if self.skin_modal_open:
             self._draw_skin_modal(self.screen)
+
+        if self.controls_popup_open:
+            shade = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+            shade.fill((0, 0, 0, 152))
+            self.screen.blit(shade, (0, 0))
+            popup = self._controls_popup_rect()
+            pygame.draw.rect(self.screen, (20, 40, 64), popup, border_radius=14)
+            pygame.draw.rect(self.screen, (236, 246, 255), popup, 2, border_radius=14)
+
+            title = self.font_body.render("CONTROLS", True, (242, 250, 255))
+            self.screen.blit(title, (popup.x + 24, popup.y + 20))
+            subtitle = self.font_tiny.render(
+                "Click a bind, then press a key. Esc cancels rebinding.",
+                True,
+                (186, 210, 228),
+            )
+            self.screen.blit(subtitle, (popup.x + 24, popup.y + 52))
+
+            for action, label in self._controls_actions():
+                bind_rect = self._controls_bind_rect(action)
+                label_surf = self.font_body.render(label, True, (230, 242, 252))
+                self.screen.blit(label_surf, (popup.x + 36, bind_rect.y + 8))
+
+                waiting = self.controls_waiting_action == action
+                fill = (26, 52, 82) if not waiting else (56, 88, 124)
+                edge = (182, 206, 226) if not waiting else (255, 244, 170)
+                pygame.draw.rect(self.screen, fill, bind_rect, border_radius=10)
+                pygame.draw.rect(self.screen, edge, bind_rect, 2, border_radius=10)
+                keycap_label = self._controls_keycap_label(self.controls_bindings.get(action, action), waiting)
+                keycap_w = 42 if len(keycap_label) <= 2 else 50
+                keycap_h = 28
+                keycap = pygame.Rect(0, 0, keycap_w, keycap_h)
+                keycap.center = bind_rect.center
+                pygame.draw.rect(self.screen, (18, 40, 62), keycap, border_radius=7)
+                pygame.draw.rect(
+                    self.screen,
+                    (194, 216, 234) if not waiting else (255, 244, 170),
+                    keycap,
+                    2,
+                    border_radius=7,
+                )
+                keycap_text = self.font_tiny.render(
+                    keycap_label,
+                    True,
+                    (238, 246, 255) if not waiting else (255, 248, 196),
+                )
+                self.screen.blit(keycap_text, keycap_text.get_rect(center=keycap.center))
+
+            now = pygame.time.get_ticks()
+            if self.controls_feedback and now <= self.controls_feedback_until_ms:
+                feedback = self.font_tiny.render(self.controls_feedback, True, (255, 236, 188))
+                self.screen.blit(feedback, (popup.x + 24, popup.bottom - 84))
+
+            self._draw_button(self._controls_save_button_rect(), "SAVE/APPLY", accent=(104, 224, 172), glow=True)
+            self._draw_button(self._controls_reset_button_rect(), "RESET DEFAULT", accent=(236, 194, 112), glow=True)
+            self._draw_button(self._controls_close_button_rect(), "CLOSE", accent=(232, 132, 132), glow=True)
         pygame.display.flip()
 
-    def run(self) -> tuple[bool, bool, bool, str | None, dict[str, dict[str, str]]]:
+    def run(self) -> tuple[bool, bool, bool, str | None, dict[str, dict[str, str]], bool]:
         while self.running:
             self._events()
             self._drain_queue()
@@ -3625,6 +4035,7 @@ class PygameLobbyScene:
             self.start_game,
             self.start_game_opponent,
             self.match_skins,
+            self.start_game_as_spectator,
         )
 
 
@@ -3671,7 +4082,7 @@ def run_prelobby_to_lobby(
             server_ip=server_ip,
             server_port=server_port,
         )
-        back_to_prelobby, quit_app, start_game, opponent, match_skins = lobby.run()
+        back_to_prelobby, quit_app, start_game, opponent, match_skins, start_as_spectator = lobby.run()
         if quit_app:
             pygame.quit()
             return
@@ -3684,6 +4095,7 @@ def run_prelobby_to_lobby(
                 server_port=server_port,
                 username=username,
                 preferred_opponent=opponent,
+                spectator_mode=start_as_spectator,
                 return_to_tk_lobby=False,
                 keep_window_open_on_return=True,
                 initial_skin=skin_to_dict(lobby.current_skin),

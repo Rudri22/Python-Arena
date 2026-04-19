@@ -24,6 +24,7 @@ from client.snake_skins import (
     derive_skin_colors,
     draw_segmented_snake,
 )
+from client.controls_config import DIRECTION_ACTIONS, load_direction_bindings
 from shared.protocol import (
     MessageType,
     SnakeSkin,
@@ -285,6 +286,8 @@ class PygameArenaWindow:
         self.player_b_name = "Opponent"
         self.last_server_message = "Connecting..."
         self.last_move_ms = now_ms
+        self.direction_bindings = load_direction_bindings()
+        self.direction_key_map = self._build_direction_key_map()
 
         # ── Game entity state ──────────────────────────────────────────
         self.snake_a: list[tuple[int, int]] = [(3, 9), (2, 9), (1, 9)]
@@ -310,6 +313,7 @@ class PygameArenaWindow:
         self.result_winner = "-"
         self.result_reason = "-"
         self.result_scores: dict[str, int] = {}
+        self.result_display_names: list[str] = []
         self.return_to_lobby_requested = False
         self.chat_messages: deque[str] = deque(maxlen=6)
         self.chat_input = ""
@@ -1920,6 +1924,7 @@ class PygameArenaWindow:
             self.result_winner = str(payload.get("winner", "-"))
             self.result_reason = str(payload.get("reason", "-"))
             self.result_scores = dict(payload.get("final_scores", {}))
+            self.result_display_names = [str(name) for name in self.result_scores.keys()]
             self.last_server_message = f"Game over. Winner: {self.result_winner}"
             return
 
@@ -1956,12 +1961,13 @@ class PygameArenaWindow:
         preferred = self.preferred_opponent
         if preferred:
             matching = [u for u in opponents if u.casefold() == preferred.casefold()]
-            if matching:
-                opponent = matching[0]
-                if self.username.casefold() > opponent.casefold():
-                    return
-            else:
-                opponent = opponents[0]
+            if not matching:
+                # When launched from lobby for a specific pairing, never fall back
+                # to inviting a random user during transient online-list updates.
+                return
+            opponent = matching[0]
+            if self.username.casefold() > opponent.casefold():
+                return
         else:
             opponent = opponents[0]
         self.connection.send_message(
@@ -1980,10 +1986,12 @@ class PygameArenaWindow:
         if not targets:
             return
         preferred = self.preferred_opponent
-        target = (
-            next((u for u in targets if u.casefold() == preferred.casefold()), targets[0])
-            if preferred else targets[0]
-        )
+        if preferred:
+            target = next((u for u in targets if u.casefold() == preferred.casefold()), None)
+            if target is None:
+                return
+        else:
+            target = targets[0]
         self.connection.send_message(
             make_invitation_message(from_user=self.username, to_user=target, action="spectate")
         )
@@ -1998,12 +2006,35 @@ class PygameArenaWindow:
         old_a = list(self.snake_a)
         old_b = list(self.snake_b)
         snakes = state.get("snakes", [])
-        my_snake  = next((s for s in snakes if str(s.get("player", "")).casefold() == self.username.casefold()), None)
-        opp_snake = next((s for s in snakes if str(s.get("player", "")).casefold() != self.username.casefold()), None)
-        if my_snake is None and snakes:
-            my_snake = snakes[0]
-        if opp_snake is None and len(snakes) >= 2:
-            opp_snake = snakes[1]
+        my_snake = None
+        opp_snake = None
+
+        if self.spectator_mode:
+            # Spectators are not one of the active snake players; always map
+            # directly to the first two authoritative snake entries.
+            if snakes:
+                my_snake = snakes[0]
+            if len(snakes) >= 2:
+                opp_snake = snakes[1]
+        else:
+            my_snake = next(
+                (s for s in snakes if str(s.get("player", "")).casefold() == self.username.casefold()),
+                None,
+            )
+            if my_snake is not None:
+                my_name_cf = str(my_snake.get("player", "")).casefold()
+                opp_snake = next(
+                    (s for s in snakes if str(s.get("player", "")).casefold() != my_name_cf),
+                    None,
+                )
+            if my_snake is None and snakes:
+                my_snake = snakes[0]
+            if opp_snake is None and len(snakes) >= 2:
+                first_name_cf = str(my_snake.get("player", "")).casefold() if my_snake else ""
+                opp_snake = next(
+                    (s for s in snakes if str(s.get("player", "")).casefold() != first_name_cf),
+                    snakes[1],
+                )
 
         if my_snake is not None:
             self.player_a_name = str(my_snake.get("player", self.player_a_name))
@@ -2092,15 +2123,21 @@ class PygameArenaWindow:
     # Gameplay: movement + input
     # ==================================================================
 
+    def _build_direction_key_map(self) -> dict[int, str]:
+        mapping: dict[int, str] = {}
+        for action in DIRECTION_ACTIONS:
+            key_name = str(self.direction_bindings.get(action, "")).strip().lower()
+            if not key_name:
+                continue
+            try:
+                mapping[pygame.key.key_code(key_name)] = action
+            except ValueError:
+                continue
+        return mapping
+
     def _handle_direction_input(self, key: int) -> None:
-        direction_map = {
-            pygame.K_UP: "up",    pygame.K_w: "up",
-            pygame.K_DOWN: "down", pygame.K_s: "down",
-            pygame.K_LEFT: "left", pygame.K_a: "left",
-            pygame.K_RIGHT: "right", pygame.K_d: "right",
-        }
-        if key in direction_map:
-            requested = direction_map[key]
+        if key in self.direction_key_map:
+            requested = self.direction_key_map[key]
             if _OPPOSITE_DIRECTION.get(self.snake_a_direction) != requested:
                 self.snake_a_direction = requested
 
@@ -2455,11 +2492,25 @@ class PygameArenaWindow:
         div_y = card.y + 96
         pygame.draw.line(self.screen, (*accent, 80), (card.x + 50, div_y), (card.right - 50, div_y))
 
-        # Resolve health values
-        a_name = self.player_a_name
-        b_name = self.player_b_name
-        a_hp = int(self.result_scores.get(a_name, self.snake_a_health))
-        b_hp = int(self.result_scores.get(b_name, self.snake_b_health))
+        # Resolve names/health values using authoritative server game-over payload
+        # so every client (both players + spectators) sees the same score ordering.
+        display_names = [name for name in self.result_display_names if name]
+        if len(display_names) >= 2:
+            a_name, b_name = display_names[0], display_names[1]
+        else:
+            a_name, b_name = self.player_a_name, self.player_b_name
+
+        def _score_for(name: str, fallback: int) -> int:
+            if name in self.result_scores:
+                return int(self.result_scores[name])
+            lowered = name.casefold()
+            for key, value in self.result_scores.items():
+                if str(key).casefold() == lowered:
+                    return int(value)
+            return int(fallback)
+
+        a_hp = _score_for(a_name, self.snake_a_health if a_name == self.player_a_name else 0)
+        b_hp = _score_for(b_name, self.snake_b_health if b_name == self.player_b_name else 0)
 
         row_y = div_y + 20
         left_x  = card.x + 50
