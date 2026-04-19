@@ -95,6 +95,72 @@ class TimerState:
 
 
 @dataclass(slots=True)
+class SnakeSkin:
+    """Per-player cosmetic appearance chosen in the lobby."""
+
+    color: str = "venom"
+    pattern: str = "solid"
+    hat: str = "none"
+    tail: str = "none"
+    eyes: str = "normal"
+
+
+SKIN_COLORS: dict[str, tuple[int, int, int]] = {
+    "venom":  (76, 246, 132),
+    "moss":   (72, 140, 72),
+    "rot":    (158, 196, 60),
+    "toxin":  (190, 255, 90),
+    "ember":  (244, 78, 62),
+    "forge":  (230, 130, 40),
+    "ash":    (110, 110, 115),
+    "stone":  (160, 160, 160),
+    "iron":   (80, 90, 110),
+    "bone":   (226, 218, 196),
+    "dirt":   (150, 110, 70),
+    "dusk":   (95, 70, 140),
+}
+
+PATTERNS: tuple[str, ...] = ("solid", "scales", "stripes", "diamond", "speckled")
+HATS: tuple[str, ...] = ("none", "helmet", "crown", "wizard", "jester")
+TAILS: tuple[str, ...] = ("none", "rattle", "spike", "flame")
+EYE_STYLES: tuple[str, ...] = ("normal", "fierce", "glow", "visor")
+
+
+def sanitize_skin(raw: dict | None) -> SnakeSkin:
+    """Coerce a raw dict into a valid SnakeSkin, falling back to defaults."""
+
+    defaults = SnakeSkin()
+    if not isinstance(raw, dict):
+        return defaults
+
+    color = raw.get("color", defaults.color)
+    pattern = raw.get("pattern", defaults.pattern)
+    hat = raw.get("hat", defaults.hat)
+    tail = raw.get("tail", defaults.tail)
+    eyes = raw.get("eyes", defaults.eyes)
+
+    return SnakeSkin(
+        color=color if color in SKIN_COLORS else defaults.color,
+        pattern=pattern if pattern in PATTERNS else defaults.pattern,
+        hat=hat if hat in HATS else defaults.hat,
+        tail=tail if tail in TAILS else defaults.tail,
+        eyes=eyes if eyes in EYE_STYLES else defaults.eyes,
+    )
+
+
+def skin_to_dict(skin: SnakeSkin) -> dict[str, str]:
+    """Convert a SnakeSkin to a plain JSON-ready dict."""
+
+    return asdict(skin)
+
+
+def skin_from_dict(data: dict | None) -> SnakeSkin:
+    """Parse a dict (possibly from the wire) into a validated SnakeSkin."""
+
+    return sanitize_skin(data)
+
+
+@dataclass(slots=True)
 class GameState:
     """
     Full shared state of a running or finished game.
@@ -329,10 +395,16 @@ def make_connect_message(
     )
 
 
-def make_username_message(username: str) -> dict[str, Any]:
+def make_username_message(
+    username: str,
+    skin: dict[str, str] | SnakeSkin | None = None,
+) -> dict[str, Any]:
     """Sent by the client after connection so the server can register a name."""
 
-    return build_message(MessageType.USERNAME, username=username)
+    payload: dict[str, Any] = {"username": username}
+    if skin is not None:
+        payload["skin"] = skin_to_dict(skin) if isinstance(skin, SnakeSkin) else dict(skin)
+    return build_message(MessageType.USERNAME, **payload)
 
 
 def make_online_users_message(users: list[str]) -> dict[str, Any]:
@@ -367,6 +439,7 @@ def make_invitation_message(
     to_user: str,
     action: str,
     game_id: str | None = None,
+    skins: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """
     Invitation messages cover invite lifecycle events.
@@ -385,6 +458,8 @@ def make_invitation_message(
     }
     if game_id is not None:
         payload["game_id"] = game_id
+    if skins is not None:
+        payload["skins"] = skins
 
     return build_message(MessageType.INVITATION, **payload)
 
@@ -425,6 +500,7 @@ def make_invitation_status_message(
 def make_match_start_message(
     game_id: str,
     players: list[str],
+    skins: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """
     Build a match-start notification once an invitation is accepted.
@@ -436,14 +512,17 @@ def make_match_start_message(
     if len(players) != 2:
         raise ProtocolError("Match start must include exactly two players.")
 
-    return build_message(
-        MessageType.INVITATION,
-        from_user="SERVER",
-        to_user="both_players",
-        action="match_started",
-        game_id=game_id,
-        players=players,
-    )
+    payload: dict[str, Any] = {
+        "from_user": "SERVER",
+        "to_user": "both_players",
+        "action": "match_started",
+        "game_id": game_id,
+        "players": players,
+    }
+    if skins is not None:
+        payload["skins"] = skins
+
+    return build_message(MessageType.INVITATION, **payload)
 
 
 def make_movement_message(

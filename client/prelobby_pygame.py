@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import queue
@@ -7,7 +7,7 @@ import threading
 import tempfile
 import wave
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -15,7 +15,52 @@ from uuid import uuid4
 import pygame
 
 from client.network import ClientConnection
-from shared.protocol import MessageType, make_chat_message, make_invitation_message, make_username_message
+from client.snake_skins import (
+    draw_segmented_snake,
+    draw_snake_eyes,
+    draw_snake_hat,
+    draw_snake_pattern,
+    draw_snake_tail,
+)
+from shared.protocol import (
+    EYE_STYLES,
+    HATS,
+    MessageType,
+    PATTERNS,
+    SKIN_COLORS,
+    SnakeSkin,
+    TAILS,
+    make_chat_message,
+    make_invitation_message,
+    make_username_message,
+    sanitize_skin,
+    skin_to_dict,
+)
+
+"""
+Python-Arena Prelobby + Lobby (single-file feature map)
+========================================================
+
+This file contains TWO major runtime scenes:
+
+1) `PreLobby` (pygame animated deployment scene)
+   - Background rendering: sky/grid/terrain/fx
+   - Ambient AI snakes and food interaction
+   - Username + deploy UI flow
+   - Deploy transition animation into lobby
+
+2) `PygameLobbyScene` (same-window multiplayer lobby)
+   - Server connection + protocol message handling
+   - Online players / invitations / private+public chat
+   - Leaderboard + spectator entry points
+   - Left "Your Snake" visual card and skin controls
+
+How to read this file quickly:
+- Utility/data classes first (`MusicController`, `Star`, `Particle`, etc.)
+- `PreLobby` scene (visual intro + deploy validation)
+- `PygameLobbyScene` scene (networked lobby UI and logic)
+- Entry helpers (`run_prelobby_to_lobby`, `main`)
+"""
 
 WIDTH = 1280
 HEIGHT = 720
@@ -52,6 +97,7 @@ def draw_round_rect(surface: pygame.Surface, rect: pygame.Rect, color: tuple[int
 
 
 class MusicController:
+    """Handles generated loop music + short SFX (eat/error) for pre-lobby feedback."""
     def __init__(self) -> None:
         self.ready = False
         self.playing = False
@@ -235,6 +281,22 @@ class SnakeUnit:
 
 
 class PreLobby:
+    """
+    Animated pre-lobby deployment scene.
+
+    Feature map (PreLobby):
+    - Asset/music init: `__init__`, `_load_asset_icon`, `_load_skin_icon`
+    - Snake simulation:
+      `_spawn_snakes`, `_respawn_snake`, `_update_snakes`, `_segment_alpha`
+    - Interaction effects:
+      `_throw_food`, `_trigger_scatter`, `_spawn_explosion`, `_spawn_crumb_burst`
+    - Ambient rendering:
+      `_bg_gradient`, `_draw_background`, `_draw_snakes`, `_draw_effects`
+    - UI and input:
+      `_draw_ui`, `_handle_click`, `_events`, `_attempt_deploy`
+    - Deploy transition:
+      `_deploy_close_progress`, `update`, `draw`, `run`
+    """
     def __init__(
         self,
         *,
@@ -283,12 +345,8 @@ class PreLobby:
         self.h2 = pygame.font.SysFont("arial black", 20, bold=True)
         self.body_font = pygame.font.SysFont("bahnschrift", 18, bold=True)
         self.small = pygame.font.SysFont("arial", 16, bold=True)
-        self.skin_icon = self._load_skin_icon()
         self.music_icon_on = self._load_asset_icon("music.png")
         self.music_icon_off = self._load_asset_icon("no-music.png")
-
-    def _load_skin_icon(self) -> pygame.Surface | None:
-        return self._load_asset_icon("snake.png")
 
     def _load_asset_icon(self, filename: str) -> pygame.Surface | None:
         icon_path = Path(__file__).resolve().parent / "assets" / filename
@@ -695,8 +753,6 @@ class PreLobby:
         surf.blit(vignette, (0, 0))
 
     def _draw_snakes(self, surf: pygame.Surface) -> None:
-        player_skin = SKINS[self.skin_idx]
-        player_color = player_skin[1]
         for idx, snake in enumerate(self.snakes):
             if snake.respawn_timer > 0:
                 continue
@@ -760,13 +816,6 @@ class PreLobby:
                 pygame.draw.line(surf, (230, 70, 70), tongue_tip, tongue_tip + fork, 1)
                 pygame.draw.line(surf, (230, 70, 70), tongue_tip, tongue_tip - fork, 1)
 
-            # selected player snake glow
-            if idx == 0:
-                pulse = 0.5 + 0.5 * math.sin(self.frame * 0.08)
-                glow_radius = int(28 + pulse * 7)
-                glow = pygame.Surface((glow_radius * 2, glow_radius * 2), pygame.SRCALPHA)
-                pygame.draw.circle(glow, (player_color[0], player_color[1], player_color[2], 55), (glow_radius, glow_radius), glow_radius)
-                surf.blit(glow, (snake.head().x - glow_radius, snake.head().y - glow_radius))
 
     def _draw_effects(self, surf: pygame.Surface) -> None:
         # dropped food bait
@@ -798,9 +847,6 @@ class PreLobby:
 
     def _music_center(self) -> pygame.Vector2:
         return pygame.Vector2(92, 84)
-
-    def _skin_center(self) -> pygame.Vector2:
-        return pygame.Vector2(self.w - 92, 84)
 
     def _input_rect(self) -> pygame.Rect:
         card = self._card_rect()
@@ -1119,35 +1165,7 @@ class PreLobby:
             tip = self.small.render("Toggle Music", True, (226, 232, 240))
             surf.blit(tip, (m.x - 44, m.y + 50))
 
-        # top-right skin control (restored)
-        s = self._skin_center() + pygame.Vector2(0, dy)
-        pygame.draw.circle(surf, (22, 44, 64, 236), s, 40)
-        pygame.draw.circle(surf, (72, 214, 152), s, 40, 3)
-        inner_s = pygame.Surface((66, 66), pygame.SRCALPHA)
-        pygame.draw.circle(inner_s, (255, 255, 255, 230), (33, 33), 26)
-        pygame.draw.circle(inner_s, (236, 241, 255, 255), (33, 33), 26, 2)
-        surf.blit(inner_s, (s.x - 33, s.y - 33))
-        pygame.draw.circle(surf, (72, 214, 152, 140), s, 46, 2)
-        # snake + wardrobe badge icon (inline to avoid cross-class helper issues)
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (int(s.x) - 21, int(s.y) - 21))
-            surf.blit(icon, icon.get_rect(center=(int(s.x), int(s.y) - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(int(s.x) - 13, int(s.y) - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (int(s.x) + 8, int(s.y) - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (int(s.x) + 9, int(s.y) - 3), 1)
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (int(s.x) + 10, int(s.y) + 8))
+        # top-right snake icon removed by request
 
         # deploy button frame + reactive button
         btn = self._deploy_rect().move(0, dy)
@@ -1210,7 +1228,6 @@ class PreLobby:
                 surf.blit(reveal, reveal_rect.topleft)
     def _handle_click(self, pos: tuple[int, int]) -> bool:
         m = self._music_center()
-        s = self._skin_center()
         input_rect = self._input_rect()
         btn = self._deploy_rect()
         card = self._card_rect()
@@ -1225,12 +1242,6 @@ class PreLobby:
         self.input_focus = input_rect.collidepoint(p)
         if pygame.Vector2(p).distance_to(m) <= 40:
             self.music_on = self.music.toggle()
-            handled_ui = True
-        if pygame.Vector2(p).distance_to(s) <= 40:
-            if p[0] < s.x:
-                self.skin_idx = (self.skin_idx - 1) % len(SKINS)
-            else:
-                self.skin_idx = (self.skin_idx + 1) % len(SKINS)
             handled_ui = True
 
         # suggestions
@@ -1347,7 +1358,27 @@ class PreLobby:
 
 
 class PygameLobbyScene:
-    """Simple same-window lobby scene shown after pre-lobby deploy."""
+    """
+    Networked lobby scene shown in the SAME window after pre-lobby deploy.
+
+    Feature map (Lobby):
+    - Connection lifecycle:
+      `_connect`, `_disconnect`, `_receiver_loop`, `_drain_queue`, `_handle_message`
+    - Invitations:
+      `_send_invite`, `_reply_invite`, `_cancel_outgoing_invite`, invite rect helpers
+    - Chat (public + private tabs/dropdown):
+      `_send_chat`, `_set_private_target`, `_chat_target_*`, `_current_chat_bubbles`
+    - Online players + spectator:
+      `_player_row_rect`, `_player_eye_rect`, `_start_spectate`
+    - Scroll systems:
+      `_players_scroll*`, `_incoming_invites_scroll*`, `_chat_scroll*`
+    - Layout helpers:
+      `_left_panel_rect`, `_logs_rect`, `_users_rect`, `_right_rect*`, etc.
+    - Drawing:
+      `_draw_button`, `_ranked_players`, `_draw`
+    - Runtime loop:
+      `_events`, `run`
+    """
 
     def __init__(
         self,
@@ -1369,15 +1400,30 @@ class PygameLobbyScene:
         self.quit_app = False
         self.frame = 0
 
+        # Standard lobby typography
         self.font_title = pygame.font.SysFont("arial black", 34, bold=True)
         self.font_body = pygame.font.SysFont("bahnschrift", 20, bold=True)
         self.font_small = pygame.font.SysFont("arial", 16)
         self.font_tiny = pygame.font.SysFont("arial", 14)
+        # Snake-style fonts only for specific hero elements
+        self.font_orbitron = pygame.font.SysFont("papyrus", 20, bold=True)  # used by CHANGE SKIN
+        self.font_header_sub = pygame.font.SysFont("arial", 18, bold=True)
+        self.font_snake_title = pygame.font.SysFont("papyrus", 46, bold=True)
+        self.font_snake_panel = pygame.font.SysFont("papyrus", 36, bold=True)
+        self.font_cinzel = pygame.font.SysFont("Cinzel Decorative", 15, bold=True)
         self.cup_icon = self._load_asset_icon("cup.gif")
         self.eye_icon = self._load_asset_icon("eye.png")
         self.rank1_icon = self._load_asset_icon("rank1.png")
         self.rank2_icon = self._load_asset_icon("rank2.png")
         self.rank3_icon = self._load_asset_icon("rank3.png")
+        self.change_skin_icon = self._load_asset_icon("change_skin_snake.png")
+        # Quick-cycle palette keys for the prev/next dots on the left panel.
+        self.skin_color_keys: list[str] = list(SKIN_COLORS.keys())
+        self.current_skin: SnakeSkin = SnakeSkin()
+        self.pending_skin: SnakeSkin = SnakeSkin()
+        self.skin_modal_open: bool = False
+        self.skin_modal_tab: str = "color"
+        self.match_skins: dict[str, dict[str, str]] = {}
 
         self.connection: ClientConnection | None = None
         self.receiver_thread: threading.Thread | None = None
@@ -1408,18 +1454,27 @@ class PygameLobbyScene:
         self._next_join_order = 1
         self.leaderboard_scroll = 0
         self.players_scroll = 0
+        self.players_expanded = False
+        self.players_expand_t = 0.0
+        self.players_expand_speed = 0.2
         self.pending_invites_scroll = 0
         self.pending_invites_dragging = False
         self.pending_invites_drag_offset_y = 0
+        self.players_dragging = False
+        self.players_drag_offset_y = 0
         self.chat_scroll = 0
         self.chat_dragging = False
         self.chat_drag_offset_y = 0
+        self.chat_target_open = False
+        self.chat_target_scroll = 0
         self._last_invite_target: str | None = None
         self.start_game = False
         self.start_game_opponent: str | None = None
         self._username_retry_count = 0
         self._username_retry_max = 12
         self._next_username_retry_ms = 0
+        self.quick_match_waiting = False
+        self._next_quick_match_ping_ms = 0
 
         self._connect()
 
@@ -1431,78 +1486,6 @@ class PygameLobbyScene:
             return pygame.image.load(str(icon_path)).convert_alpha()
         except pygame.error:
             return None
-
-    def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
-        """Draw a snake + clothing badge icon for skin selection."""
-        cx, cy = center
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (cx - 21, cy - 21))
-            surf.blit(icon, icon.get_rect(center=(cx, cy - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(cx - 13, cy - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (cx + 8, cy - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (cx + 9, cy - 3), 1)
-
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (cx + 10, cy + 8))
-
-    def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
-        """Draw a snake + clothing badge icon for skin selection."""
-        cx, cy = center
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (cx - 21, cy - 21))
-            surf.blit(icon, icon.get_rect(center=(cx, cy - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(cx - 13, cy - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (cx + 8, cy - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (cx + 9, cy - 3), 1)
-
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (cx + 10, cy + 8))
-
-    def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
-        """Draw a snake + clothing badge icon for skin selection."""
-        cx, cy = center
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (cx - 21, cy - 21))
-            surf.blit(icon, icon.get_rect(center=(cx, cy - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(cx - 13, cy - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (cx + 8, cy - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (cx + 9, cy - 3), 1)
-
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (cx + 10, cy + 8))
 
     def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
         """Draw a snake + clothing badge icon for skin selection."""
@@ -1631,7 +1614,7 @@ class PygameLobbyScene:
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
         try:
-            self.connection.send_message(make_username_message(self.username))
+            self.connection.send_message(make_username_message(self.username, skin_to_dict(self.current_skin)))
             self._append_log(f"[SYSTEM] Username submitted: {self.username}")
         except OSError as error:
             self._append_log(f"[ERROR] Username submit failed: {error}")
@@ -1646,13 +1629,48 @@ class PygameLobbyScene:
             return
         self._next_username_retry_ms = 0
         try:
-            self.connection.send_message(make_username_message(self.username))
+            self.connection.send_message(make_username_message(self.username, skin_to_dict(self.current_skin)))
             self._append_log(f"[SYSTEM] Retrying username: {self.username}")
         except OSError as error:
             self._append_log(f"[ERROR] Username retry failed: {error}")
 
+    def _retry_quick_match_if_due(self) -> None:
+        if not self.quick_match_waiting:
+            return
+        if self.connection is None:
+            self.quick_match_waiting = False
+            return
+        now = pygame.time.get_ticks()
+        if now < self._next_quick_match_ping_ms:
+            return
+        self._next_quick_match_ping_ms = now + 1200
+        try:
+            self.connection.send_message(
+                make_invitation_message(
+                    from_user=self.username,
+                    to_user=self.username,
+                    action="quick_match",
+                )
+            )
+        except OSError as error:
+            self.quick_match_waiting = False
+            self._append_log(f"[ERROR] Quick Match retry failed: {error}")
+
     def _disconnect(self) -> None:
         if self.connection is not None:
+            if self.start_game:
+                # Tell the server to keep the match alive during the
+                # lobby → game_window reconnect window (8-second grace period).
+                try:
+                    self.connection.send_message(
+                        make_invitation_message(
+                            from_user=self.username,
+                            to_user=self.username,
+                            action="handoff",
+                        )
+                    )
+                except OSError:
+                    pass
             try:
                 self.connection.close()
             except OSError:
@@ -1749,6 +1767,7 @@ class PygameLobbyScene:
                 self.pending_invites_scroll = min(self.pending_invites_scroll, max_scroll)
                 self._append_log(f"[INVITE] {from_user} invited you.")
             elif action in {"accepted", "declined", "cancelled"}:
+                self.quick_match_waiting = False
                 if from_user.casefold() == self.username.casefold():
                     self._remove_outgoing_pending(to_user)
                 elif to_user.casefold() == self.username.casefold():
@@ -1760,14 +1779,27 @@ class PygameLobbyScene:
                         self.pending_invite_from = self.pending_invites[0] if self.pending_invites else None
                 self._append_log(f"[INVITE] {payload}")
             elif action == "match_started":
+                self.quick_match_waiting = False
+                self._next_quick_match_ping_ms = 0
                 game_id = payload.get("game_id", "unknown")
                 self._append_log(f"[MATCH] Started game_id={game_id}")
+                skins_payload = payload.get("skins")
+                if isinstance(skins_payload, dict):
+                    self.match_skins = {str(k): dict(v) for k, v in skins_payload.items() if isinstance(v, dict)}
                 opponent = self._extract_opponent_from_match(payload)
                 if opponent:
                     self._remove_outgoing_pending(opponent)
                 self.start_game_opponent = opponent
                 self.start_game = True
                 self.running = False
+            elif action == "quick_cancelled" and to_user.casefold() == self.username.casefold():
+                self.quick_match_waiting = False
+                self._next_quick_match_ping_ms = 0
+                self._append_log("[MATCH] Quick Match cancelled.")
+            elif action == "waiting" and to_user.casefold() == self.username.casefold():
+                self.quick_match_waiting = True
+                self._next_quick_match_ping_ms = pygame.time.get_ticks() + 1200
+                self._append_log("[MATCH] Quick Match: waiting for another player...")
             else:
                 self._append_log(f"[INVITE] {payload}")
             return
@@ -1807,6 +1839,8 @@ class PygameLobbyScene:
         if msg_type == MessageType.ERROR.value:
             error_message = str(payload.get("message", "Unknown error"))
             self._append_log(f"[ERROR] {error_message}")
+            if "quick match" in error_message.casefold() or "invitation action failed" in error_message.casefold():
+                self.quick_match_waiting = False
             if "username already taken" in error_message.casefold():
                 self._username_retry_count += 1
                 if self._username_retry_count <= self._username_retry_max:
@@ -1845,6 +1879,9 @@ class PygameLobbyScene:
         return selected
 
     def _send_invite(self, explicit_target: str | None = None) -> None:
+        if self.quick_match_waiting:
+            self._append_log("[MATCH] Cancel Quick Match before sending invites.")
+            return
         if self._has_outgoing_pending():
             return
         opponent = explicit_target or self._selected_opponent()
@@ -1922,14 +1959,13 @@ class PygameLobbyScene:
 
     def _chat_panel_rect(self) -> pygame.Rect:
         center = self._logs_rect()
-        invites_bottom = self._incoming_invites_area_rect().bottom
-        # Leave a dedicated lane above the chat box for chat tabs.
-        chat_top = max(center.y + 258, invites_bottom + 34)
+        top_panel = self._center_top_rect()
+        chat_top = top_panel.bottom + 16
         return pygame.Rect(
-            center.x + 10,
+            center.x,
             chat_top,
-            center.width - 20,
-            max(90, center.height - (chat_top - center.y) - 56),
+            center.width,
+            max(120, center.bottom - chat_top - 56),
         )
 
     def _visible_pending_invites(self, max_items: int | None = None) -> list[str]:
@@ -1990,6 +2026,41 @@ class PygameLobbyScene:
             start_x += tab_w + 6
         return public_tab, private_tabs
 
+    def _chat_target_options(self) -> list[str]:
+        opts = ["Lobby Chat"]
+        for partner in self.private_chat_tabs[-10:]:
+            opts.append(partner)
+        return opts
+
+    def _chat_target_rect(self) -> pygame.Rect:
+        send = self._chat_send_rect()
+        return pygame.Rect(send.x - 156, send.y, 148, send.height)
+
+    def _chat_target_label(self) -> str:
+        if self.chat_mode == "private" and self.active_private_target:
+            return self.active_private_target
+        return "Lobby Chat"
+
+    def _set_chat_target(self, label: str) -> None:
+        if label == "Lobby Chat":
+            self.chat_mode = "public"
+            self.active_private_target = None
+        else:
+            self._set_private_target(label)
+            self.chat_mode = "private"
+
+    def _chat_target_dropdown_rect(self) -> pygame.Rect:
+        t = self._chat_target_rect()
+        visible = self._chat_target_visible_count()
+        return pygame.Rect(t.x, t.y - (visible * 26) - 6, t.width, visible * 26)
+
+    def _chat_target_visible_count(self) -> int:
+        return min(6, len(self._chat_target_options()))
+
+    def _chat_target_option_rect(self, visible_index: int) -> pygame.Rect:
+        dd = self._chat_target_dropdown_rect()
+        return pygame.Rect(dd.x, dd.y + visible_index * 26, dd.width, 24)
+
     def _player_popup_rect(self) -> pygame.Rect:
         width = 280
         height = 150
@@ -2029,40 +2100,159 @@ class PygameLobbyScene:
         self.pending_invite_from = self.pending_invites[0] if self.pending_invites else None
 
     def _users_rect(self) -> pygame.Rect:
-        # Left column: leaderboard
-        return pygame.Rect(40, 120, 260, self.h - 240)
+        # Right top panel: leaderboard
+        width = 320
+        height = min(320, self.h - 300)
+        return pygame.Rect(self.w - width - 32, 120, width, height)
+
+    def _left_panel_rect(self) -> pygame.Rect:
+        return pygame.Rect(32, 120, 330, self.h - 180)
+
+    def _skin_change_button_rect(self) -> pygame.Rect:
+        left = self._left_panel_rect()
+        return pygame.Rect(left.right - 136, left.y + 10, 122, 28)
+
+    def _skin_change_action_rect(self) -> pygame.Rect:
+        left = self._left_panel_rect()
+        return pygame.Rect(left.x + 22, left.y + 258, left.width - 44, 86)
+
+    def _skin_prev_rect(self) -> pygame.Rect:
+        left = self._left_panel_rect()
+        return pygame.Rect(left.x + 20, left.y + 266, 30, 30)
+
+    def _skin_next_rect(self) -> pygame.Rect:
+        left = self._left_panel_rect()
+        return pygame.Rect(left.right - 50, left.y + 266, 30, 30)
+
+    def _skin_dot_rect(self, idx: int) -> pygame.Rect:
+        left = self._left_panel_rect()
+        total = len(self.skin_color_keys)
+        spacing = 10
+        r = 5
+        total_w = total * (r * 2) + (total - 1) * spacing
+        start_x = left.centerx - total_w // 2
+        cx = start_x + idx * ((r * 2) + spacing) + r
+        cy = left.y + 282
+        return pygame.Rect(cx - r, cy - r, r * 2, r * 2)
 
     def _logs_rect(self) -> pygame.Rect:
-        # Center column: arena/chat
-        return pygame.Rect(320, 120, self.w - 640, self.h - 240)
+        # Center column container
+        left_w = 330
+        right_w = 320
+        x = 32 + left_w + 20
+        width = max(340, self.w - (x + right_w + 52))
+        return pygame.Rect(x, 120, width, self.h - 180)
 
     def _right_rect(self) -> pygame.Rect:
-        # Right column: online players
-        return pygame.Rect(self.w - 300, 120, 260, self.h - 240)
+        # Right lower panel: online players/friends (swapped with invitations)
+        # Collapsed state is centered in the expansion range so chains can
+        # feel like they are pulling the panel open from fixed anchors.
+        expanded = self._right_rect_expanded()
+        collapsed_h = 56
+        collapsed_y = expanded.y + max(0, (expanded.height - collapsed_h) // 2)
+        t = max(0.0, min(1.0, self.players_expand_t))
+        y = int(round(collapsed_y + (expanded.y - collapsed_y) * t))
+        h = int(round(collapsed_h + (expanded.height - collapsed_h) * t))
+        return pygame.Rect(expanded.x, y, expanded.width, h)
+
+    def _right_rect_expanded(self) -> pygame.Rect:
+        lb = self._users_rect()
+        # Lower and slightly narrower so chains are clearly visible around it.
+        base_w = max(250, lb.width - 56)
+        x = lb.x + (lb.width - base_w) // 2
+        y = lb.bottom + 52
+        h = min(210, max(130, self.h - y - 72))
+        return pygame.Rect(x, y, base_w, h)
+
+    def _online_header_rect(self) -> pygame.Rect:
+        right = self._right_rect()
+        return pygame.Rect(right.x + 8, right.y + 8, right.width - 16, 30)
+
+    def _players_row_height(self) -> int:
+        return 38
+
+    def _players_visible_count(self) -> int:
+        list_area = self._players_list_area_rect()
+        rows_h = max(0, list_area.height)
+        return max(1, rows_h // self._players_row_height())
+
+    def _players_list_area_rect(self) -> pygame.Rect:
+        players = self._right_rect()
+        return pygame.Rect(players.x + 10, players.y + 44, players.width - 20, max(0, players.height - 52))
+
+    def _players_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
+        area = self._players_list_area_rect()
+        bar = pygame.Rect(area.right - 16, area.y + 4, 14, max(20, area.height - 8))
+        up = pygame.Rect(bar.x, bar.y, bar.width, 14)
+        down = pygame.Rect(bar.x, bar.bottom - 14, bar.width, 14)
+        track = pygame.Rect(bar.x, up.bottom + 2, bar.width, max(8, down.y - (up.bottom + 2)))
+        return up, down, track
+
+    def _players_scroll_thumb_rect(self) -> pygame.Rect | None:
+        total = len(self.online_users)
+        visible = self._players_visible_count()
+        if total <= visible or not self.players_expanded:
+            return None
+        _, _, track = self._players_scrollbar_parts()
+        max_scroll = max(1, total - visible)
+        thumb_h = max(18, int(track.height * (visible / max(visible, total))))
+        top_ratio = self.players_scroll / max_scroll
+        thumb_y = track.y + int((track.height - thumb_h) * top_ratio)
+        return pygame.Rect(track.x + 3, thumb_y, track.width - 6, thumb_h)
+
+    def _set_players_scroll_from_thumb_y(self, thumb_y: int, thumb_h: int) -> None:
+        _, _, track = self._players_scrollbar_parts()
+        travel = max(1, track.height - thumb_h)
+        clamped_y = min(max(track.y, thumb_y), track.y + travel)
+        ratio = (clamped_y - track.y) / travel
+        max_scroll = max(0, len(self.online_users) - self._players_visible_count())
+        self.players_scroll = int(round(ratio * max_scroll))
+
+    def _update_ui_animations(self) -> None:
+        target = 1.0 if self.players_expanded else 0.0
+        self.players_expand_t += (target - self.players_expand_t) * self.players_expand_speed
+        if abs(target - self.players_expand_t) < 0.002:
+            self.players_expand_t = target
+
+    def _center_top_rect(self) -> pygame.Rect:
+        # Center top panel: invitations (swapped with online players)
+        logs = self._logs_rect()
+        return pygame.Rect(logs.x, logs.y, logs.width, min(340, logs.height - 180))
 
     def _invite_button_rect(self) -> pygame.Rect:
         players = self._right_rect()
         return pygame.Rect(players.x + 10, players.bottom - 44, players.width - 20, 34)
 
+    def _quick_match_rect(self) -> pygame.Rect:
+        left_panel = self._left_panel_rect()
+        w = 244
+        return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 106, w, 40)
+
+    def _quick_match_cancel_rect(self) -> pygame.Rect:
+        pop_w, pop_h = 420, 82
+        pop = pygame.Rect((self.w - pop_w) // 2, self.h - pop_h - 22, pop_w, pop_h)
+        return pygame.Rect(pop.right - 120, pop.centery - 16, 96, 32)
+
     def _disconnect_button_rect(self) -> pygame.Rect:
-        users = self._users_rect()
-        return pygame.Rect(users.x + 14, users.bottom - 52, users.width - 28, 38)
+        # Left panel bottom action area (Quit Game behavior)
+        left_panel = self._left_panel_rect()
+        w = 244
+        return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 58, w, 40)
 
     def _invite_by_name_rect(self) -> pygame.Rect:
-        logs = self._logs_rect()
-        return pygame.Rect(logs.x + 14, logs.y + 12, logs.width - 180, 36)
+        invites = self._center_top_rect()
+        return pygame.Rect(invites.x + 12, invites.y + 44, invites.width - 172, 34)
 
     def _invite_by_name_send_rect(self) -> pygame.Rect:
-        logs = self._logs_rect()
-        return pygame.Rect(logs.right - 156, logs.y + 12, 142, 36)
+        invites = self._center_top_rect()
+        return pygame.Rect(invites.right - 150, invites.y + 44, 138, 34)
 
     def _incoming_invites_area_rect(self) -> pygame.Rect:
-        logs = self._logs_rect()
-        visible = self._incoming_invites_visible_count()
-        card_h = 66
-        spacing = 8
-        area_h = (visible * card_h) + ((visible - 1) * spacing)
-        return pygame.Rect(logs.x + 14, logs.y + 110, logs.width - 28, area_h)
+        top = self._center_top_rect()
+        # Fixed rows:
+        # header/title, invite-by-name row, outgoing row, invitations title/pending row, invite list area
+        area_y = top.y + 188
+        return pygame.Rect(top.x + 8, area_y, top.width - 16, max(84, top.bottom - area_y - 10))
 
     def _incoming_invites_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
         area = self._incoming_invites_area_rect()
@@ -2099,9 +2289,11 @@ class PygameLobbyScene:
         return pygame.Rect(area.x + 2, area.y + index * (card_h + spacing), area.width - reserve_scrollbar, card_h)
 
     def _player_row_rect(self, visible_index: int) -> pygame.Rect:
-        players = self._right_rect()
-        players_y = players.y + 44
-        return pygame.Rect(players.x + 10, players_y + visible_index * 30, players.width - 20, 26)
+        area = self._players_list_area_rect()
+        players_y = area.y
+        row_h = self._players_row_height()
+        reserve = 22 if len(self.online_users) > self._players_visible_count() else 0
+        return pygame.Rect(area.x, players_y + visible_index * row_h, area.width - reserve, row_h - 6)
 
     def _player_eye_rect(self, row: pygame.Rect) -> pygame.Rect:
         return pygame.Rect(row.right - 24, row.y + 4, 18, 18)
@@ -2114,8 +2306,8 @@ class PygameLobbyScene:
         self.running = False
 
     def _outgoing_pending_strip_rect(self) -> pygame.Rect:
-        logs = self._logs_rect()
-        return pygame.Rect(logs.x + 14, logs.y + 66, logs.width - 28, 40)
+        invites = self._center_top_rect()
+        return pygame.Rect(invites.x + 12, invites.y + 96, invites.width - 24, 34)
 
     def _outgoing_pending_item_rects(self) -> list[tuple[str, bool, pygame.Rect, pygame.Rect]]:
         strip = self._outgoing_pending_strip_rect()
@@ -2130,11 +2322,13 @@ class PygameLobbyScene:
         for username in display_targets[-3:]:
             confirmed = any(username.casefold() == u.casefold() for u in self.outgoing_pending_invites)
             name_w = self.font_tiny.size(username[:14])[0]
-            item_w = min(250, max(176, name_w + 106))
-            if x + item_w > strip.right - 8:
+            item_w = min(250, max(176, name_w + 126))
+            max_w_here = (strip.right - 8) - x
+            if max_w_here < 148:
                 break
+            item_w = min(item_w, max_w_here)
             item = pygame.Rect(x, y, item_w, strip.height - 12)
-            cancel_rect = pygame.Rect(item.right - 58, item.y + 4, 52, item.height - 8)
+            cancel_rect = pygame.Rect(item.right - 62, item.y + 3, 56, item.height - 6)
             items.append((username, confirmed, item, cancel_rect))
             x += item_w + 8
         return items
@@ -2154,12 +2348,224 @@ class PygameLobbyScene:
 
     def _chat_rect(self) -> pygame.Rect:
         logs = self._logs_rect()
-        return pygame.Rect(logs.x + 14, logs.bottom - 46, logs.width - 28, 34)
+        return pygame.Rect(logs.x + 14, logs.bottom - 46, logs.width - 310, 34)
+
+    def _chat_send_rect(self) -> pygame.Rect:
+        chat = self._chat_rect()
+        return pygame.Rect(chat.right + 164, chat.y, 120, chat.height)
+
+    # ------------------------------------------------------------------
+    # Skin customization: state helpers, modal geometry, handlers, draw.
+    # ------------------------------------------------------------------
+
+    def _send_skin_update(self) -> None:
+        """Resend USERNAME with the current skin so the server updates its copy."""
+
+        if self.connection is None:
+            return
+        try:
+            self.connection.send_message(
+                make_username_message(self.username, skin_to_dict(self.current_skin))
+            )
+        except OSError as error:
+            self._append_log(f"[ERROR] Skin update failed: {error}")
+
+    def _set_skin_color(self, color_key: str) -> None:
+        if color_key not in SKIN_COLORS:
+            return
+        self.current_skin = dataclass_replace(self.current_skin, color=color_key)
+        self._send_skin_update()
+
+    def _cycle_skin_color(self, step: int) -> None:
+        keys = self.skin_color_keys
+        try:
+            idx = keys.index(self.current_skin.color)
+        except ValueError:
+            idx = 0
+        self._set_skin_color(keys[(idx + step) % len(keys)])
+
+    def _open_skin_modal(self) -> None:
+        self.pending_skin = dataclass_replace(self.current_skin)
+        self.skin_modal_tab = "color"
+        self.skin_modal_open = True
+
+    def _close_skin_modal(self, commit: bool) -> None:
+        if commit:
+            self.current_skin = dataclass_replace(self.pending_skin)
+            self._send_skin_update()
+        self.skin_modal_open = False
+
+    def _skin_modal_rect(self) -> pygame.Rect:
+        w, h = 620, 460
+        return pygame.Rect((self.w - w) // 2, (self.h - h) // 2, w, h)
+
+    def _skin_modal_tab_rect(self, idx: int) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        tab_w = (modal.width - 40) // 5
+        x = modal.x + 20 + idx * tab_w
+        return pygame.Rect(x, modal.y + 52, tab_w - 6, 30)
+
+    def _skin_modal_tabs(self) -> list[str]:
+        return ["color", "pattern", "hat", "tail", "eyes"]
+
+    def _skin_modal_active_options(self) -> list[str]:
+        tab = self.skin_modal_tab
+        if tab == "color":
+            return list(SKIN_COLORS.keys())
+        if tab == "pattern":
+            return list(PATTERNS)
+        if tab == "hat":
+            return list(HATS)
+        if tab == "tail":
+            return list(TAILS)
+        if tab == "eyes":
+            return list(EYE_STYLES)
+        return []
+
+    def _skin_modal_option_rect(self, idx: int) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        grid_x = modal.x + 20
+        grid_y = modal.y + 96
+        grid_w = modal.width * 60 // 100 - 20
+        grid_h = modal.height - 96 - 60
+        cols = 3 if self.skin_modal_tab == "color" else 2
+        rows_needed = 4 if self.skin_modal_tab == "color" else 3
+        cell_w = grid_w // cols
+        cell_h = min(74, grid_h // rows_needed)
+        col = idx % cols
+        row = idx // cols
+        return pygame.Rect(grid_x + col * cell_w, grid_y + row * cell_h, cell_w - 8, cell_h - 8)
+
+    def _skin_modal_preview_rect(self) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        x = modal.x + modal.width * 60 // 100 + 8
+        return pygame.Rect(x, modal.y + 96, modal.right - x - 20, modal.height - 96 - 60)
+
+    def _skin_modal_reset_rect(self) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        return pygame.Rect(modal.x + 20, modal.bottom - 46, 110, 30)
+
+    def _skin_modal_close_rect(self) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        return pygame.Rect(modal.right - 130, modal.bottom - 46, 110, 30)
+
+    def _handle_skin_modal_click(self, pos: tuple[int, int]) -> None:
+        modal = self._skin_modal_rect()
+        if not modal.collidepoint(pos):
+            self._close_skin_modal(commit=True)
+            return
+        for i, tab in enumerate(self._skin_modal_tabs()):
+            if self._skin_modal_tab_rect(i).collidepoint(pos):
+                self.skin_modal_tab = tab
+                return
+        for idx, key in enumerate(self._skin_modal_active_options()):
+            if self._skin_modal_option_rect(idx).collidepoint(pos):
+                field = self.skin_modal_tab
+                field_key = "eyes" if field == "eyes" else field
+                self.pending_skin = dataclass_replace(self.pending_skin, **{field_key: key})
+                return
+        if self._skin_modal_reset_rect().collidepoint(pos):
+            self.pending_skin = SnakeSkin()
+            return
+        if self._skin_modal_close_rect().collidepoint(pos):
+            self._close_skin_modal(commit=True)
+            return
+
+    # Skin preview: draws a small S-curve snake with the skin applied.
+    def _draw_skin_preview(self, surf: pygame.Surface, rect: pygame.Rect, skin: SnakeSkin) -> None:
+        pygame.draw.rect(surf, (12, 20, 32), rect, border_radius=10)
+        pygame.draw.rect(surf, (60, 200, 148), rect, 2, border_radius=10)
+
+        # Build a natural S-curve of segments sized to fill the preview rect
+        r = max(8, min(14, rect.height // 8))
+        n = 9
+        spread = rect.width - r * 4
+        step = spread // max(1, n - 1)
+        amp = min(int(rect.height * 0.28), 36)
+        cx0 = rect.x + r * 2
+        cy0 = rect.centery + 8
+        centers: list[tuple[float, float]] = [
+            (cx0 + i * step, cy0 + amp * math.sin(i * 1.0))
+            for i in range(n)
+        ]
+        draw_segmented_snake(surf, centers, skin, r)
+
+        label = self.font_tiny.render("PREVIEW", True, (148, 198, 228))
+        surf.blit(label, (rect.x + 10, rect.y + 8))
+
+    def _draw_skin_modal(self, surf: pygame.Surface) -> None:
+        overlay = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        surf.blit(overlay, (0, 0))
+
+        modal = self._skin_modal_rect()
+        pygame.draw.rect(surf, (14, 24, 36, 245), modal, border_radius=18)
+        pygame.draw.rect(surf, (72, 214, 152), modal, 2, border_radius=18)
+
+        title = self.font_snake_panel.render("CUSTOMIZE SNAKE", True, (96, 248, 178))
+        surf.blit(title, (modal.centerx - title.get_width() // 2, modal.y + 10))
+
+        for i, tab in enumerate(self._skin_modal_tabs()):
+            rect = self._skin_modal_tab_rect(i)
+            active = tab == self.skin_modal_tab
+            pygame.draw.rect(surf, (30, 60, 86) if active else (18, 30, 44), rect, border_radius=8)
+            pygame.draw.rect(surf, (96, 214, 178) if active else (60, 110, 140), rect, 1, border_radius=8)
+            label = self.font_tiny.render(tab.upper(), True, (220, 240, 248) if active else (150, 180, 200))
+            surf.blit(label, label.get_rect(center=rect.center))
+
+        options = self._skin_modal_active_options()
+        current_value = getattr(self.pending_skin, self.skin_modal_tab)
+        for idx, key in enumerate(options):
+            rect = self._skin_modal_option_rect(idx)
+            selected = key == current_value
+            pygame.draw.rect(surf, (24, 38, 56) if not selected else (36, 66, 92), rect, border_radius=8)
+            pygame.draw.rect(surf, (100, 226, 186) if selected else (58, 96, 126), rect, 2, border_radius=8)
+            self._draw_skin_option_thumb(surf, rect, key)
+            name = self.font_tiny.render(key.upper(), True, (224, 240, 248))
+            surf.blit(name, (rect.x + 8, rect.bottom - 18))
+
+        preview_rect = self._skin_modal_preview_rect()
+        self._draw_skin_preview(surf, preview_rect, self.pending_skin)
+
+        reset = self._skin_modal_reset_rect()
+        close = self._skin_modal_close_rect()
+        self._draw_button(reset, "RESET", accent=(236, 132, 132))
+        self._draw_button(close, "APPLY", accent=(96, 216, 168), glow=True)
+
+    def _draw_skin_option_thumb(self, surf: pygame.Surface, rect: pygame.Rect, key: str) -> None:
+        tab = self.skin_modal_tab
+        cx, cy = rect.centerx, rect.y + rect.height // 2 - 6
+        if tab == "color":
+            rgb = SKIN_COLORS[key]
+            pygame.draw.circle(surf, rgb, (cx, cy), 18)
+            pygame.draw.circle(surf, (18, 22, 30), (cx, cy), 18, 1)
+        elif tab == "pattern":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx, cy), 18)
+            if key != "solid":
+                draw_snake_pattern(surf, cx, cy, 18, 1, key, body_clr)
+        elif tab == "hat":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx, cy + 4), 14)
+            if key != "none":
+                draw_snake_hat(surf, cx, cy + 4, 14, key)
+        elif tab == "tail":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx - 6, cy), 12)
+            if key != "none":
+                draw_snake_tail(surf, cx + 8, cy, 1.0, 0.0, key)
+        elif tab == "eyes":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx, cy), 18)
+            draw_snake_eyes(surf, cx, cy, 16, 1.0, 0.0, key, body_clr)
 
     def _handle_mouse(self, pos: tuple[int, int]) -> None:
+        if self.skin_modal_open:
+            self._handle_skin_modal_click(pos)
+            return
         if self.player_popup_target is not None:
             if self._player_popup_invite_rect().collidepoint(pos):
-                if not self._has_outgoing_pending():
+                if not self._has_outgoing_pending() and not self.quick_match_waiting:
                     self._send_invite(explicit_target=self.player_popup_target)
                 self.player_popup_target = None
                 return
@@ -2179,6 +2585,36 @@ class PygameLobbyScene:
                 self._cancel_outgoing_invite(username)
                 return
 
+        if self.quick_match_waiting and self._quick_match_cancel_rect().collidepoint(pos):
+            if self.connection is not None:
+                try:
+                    self.connection.send_message(
+                        make_invitation_message(
+                            from_user=self.username,
+                            to_user=self.username,
+                            action="quick_cancel",
+                        )
+                    )
+                except OSError as error:
+                    self._append_log(f"[ERROR] Quick Match cancel failed: {error}")
+            self.quick_match_waiting = False
+            self._next_quick_match_ping_ms = 0
+            return
+
+        if self._skin_change_button_rect().collidepoint(pos) or self._skin_change_action_rect().collidepoint(pos):
+            self._open_skin_modal()
+            return
+        if self._skin_prev_rect().collidepoint(pos):
+            self._cycle_skin_color(-1)
+            return
+        if self._skin_next_rect().collidepoint(pos):
+            self._cycle_skin_color(1)
+            return
+        for idx, _key in enumerate(self.skin_color_keys):
+            if self._skin_dot_rect(idx).collidepoint(pos):
+                self._set_skin_color(self.skin_color_keys[idx])
+                return
+
         if self._chat_max_scroll() > 0:
             up, down, _ = self._chat_scrollbar_parts()
             thumb = self._chat_scroll_thumb_rect()
@@ -2191,6 +2627,21 @@ class PygameLobbyScene:
                 return
             if down.collidepoint(pos):
                 self.chat_scroll = max(0, self.chat_scroll - 1)
+                return
+
+        if self.players_expanded and len(self.online_users) > self._players_visible_count():
+            up, down, _ = self._players_scrollbar_parts()
+            thumb = self._players_scroll_thumb_rect()
+            if thumb is not None and thumb.collidepoint(pos):
+                self.players_dragging = True
+                self.players_drag_offset_y = pos[1] - thumb.y
+                return
+            if up.collidepoint(pos):
+                self.players_scroll = max(0, self.players_scroll - 1)
+                return
+            if down.collidepoint(pos):
+                max_scroll = max(0, len(self.online_users) - self._players_visible_count())
+                self.players_scroll = min(max_scroll, self.players_scroll + 1)
                 return
 
         if len(self.pending_invites) > self._incoming_invites_visible_count():
@@ -2221,34 +2672,69 @@ class PygameLobbyScene:
                 return
 
         if self._invite_by_name_send_rect().collidepoint(pos):
-            if self._typed_invite_target_valid() and not self._has_outgoing_pending():
+            if self._typed_invite_target_valid() and not self._has_outgoing_pending() and not self.quick_match_waiting:
                 self._send_invite()
             return
+        if self._chat_send_rect().collidepoint(pos):
+            if self._is_chat_enabled():
+                self._send_chat()
+            return
+        if self._quick_match_rect().collidepoint(pos):
+            if self.connection is not None:
+                try:
+                    self.connection.send_message(
+                        make_invitation_message(
+                            from_user=self.username,
+                            to_user=self.username,
+                            action="quick_match",
+                        )
+                    )
+                    # Immediate UX feedback; server responses can still refine/reset.
+                    self.quick_match_waiting = True
+                    self._next_quick_match_ping_ms = pygame.time.get_ticks() + 1200
+                    self._append_log("[MATCH] Quick Match requested. Waiting for player...")
+                except OSError as error:
+                    self.quick_match_waiting = False
+                    self._next_quick_match_ping_ms = 0
+                    self._append_log(f"[ERROR] Quick Match request failed: {error}")
+            else:
+                self.quick_match_waiting = False
+                self._next_quick_match_ping_ms = 0
+                self._append_log("[ERROR] Not connected to server. Quick Match unavailable.")
+            return
+        if self._chat_target_rect().collidepoint(pos):
+            self.chat_target_open = not self.chat_target_open
+            return
+        if self.chat_target_open:
+            dd = self._chat_target_dropdown_rect()
+            if dd.collidepoint(pos):
+                options = self._chat_target_options()
+                start = self.chat_target_scroll
+                shown = options[start : start + self._chat_target_visible_count()]
+                for i, opt in enumerate(shown):
+                    if self._chat_target_option_rect(i).collidepoint(pos):
+                        self._set_chat_target(opt)
+                        self.chat_target_open = False
+                        return
+            self.chat_target_open = False
         if self._disconnect_button_rect().collidepoint(pos):
             self.return_to_prelobby = True
             self.running = False
             return
-        chat_area = self._chat_panel_rect()
-        public_tab, private_tabs = self._chat_tabs_layout(chat_area)
-        if public_tab.collidepoint(pos):
-            self.chat_mode = "public"
-            return
-        for partner, tab_rect in private_tabs:
-            if tab_rect.collidepoint(pos):
-                self.chat_mode = "private"
-                self.active_private_target = partner
-                return
 
         chat_rect = self._chat_rect()
         self.input_focus = chat_rect.collidepoint(pos)
         self.invite_name_focus = self._invite_by_name_rect().collidepoint(pos)
 
         right = self._right_rect()
-        if right.collidepoint(pos):
-            row_h = 30
+        if self._online_header_rect().collidepoint(pos):
+            self.players_expanded = not self.players_expanded
+            return
+        if self.players_expand_t > 0.85 and right.collidepoint(pos):
+            row_h = self._players_row_height()
             visible_idx = (pos[1] - (right.y + 44)) // row_h
             idx = self.players_scroll + visible_idx
-            if 0 <= idx < len(self.online_users) and 0 <= visible_idx < 14:
+            if 0 <= idx < len(self.online_users) and 0 <= visible_idx < self._players_visible_count():
                 row = self._player_row_rect(int(visible_idx))
                 selected = self.online_users[int(idx)]
                 if selected.casefold() != self.username.casefold():
@@ -2274,6 +2760,7 @@ class PygameLobbyScene:
                 self._handle_mouse(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self.pending_invites_dragging = False
+                self.players_dragging = False
                 self.chat_dragging = False
             elif event.type == pygame.MOUSEMOTION and self.chat_dragging:
                 thumb = self._chat_scroll_thumb_rect()
@@ -2289,6 +2776,13 @@ class PygameLobbyScene:
                         event.pos[1] - self.pending_invites_drag_offset_y,
                         thumb.height,
                     )
+            elif event.type == pygame.MOUSEMOTION and self.players_dragging:
+                thumb = self._players_scroll_thumb_rect()
+                if thumb is not None:
+                    self._set_players_scroll_from_thumb_y(
+                        event.pos[1] - self.players_drag_offset_y,
+                        thumb.height,
+                    )
             elif event.type == pygame.MOUSEWHEEL:
                 mx, my = pygame.mouse.get_pos()
                 users = self._users_rect()
@@ -2297,18 +2791,27 @@ class PygameLobbyScene:
                     ranked = self._ranked_players()
                     max_scroll = max(0, len(ranked) - 10)
                     self.leaderboard_scroll = min(max(0, self.leaderboard_scroll - event.y), max_scroll)
-                elif right.collidepoint((mx, my)):
-                    max_scroll = max(0, len(self.online_users) - 14)
+                elif self.players_expand_t > 0.85 and right.collidepoint((mx, my)):
+                    max_scroll = max(0, len(self.online_users) - self._players_visible_count())
                     self.players_scroll = min(max(0, self.players_scroll - event.y), max_scroll)
                 elif self._incoming_invites_area_rect().collidepoint((mx, my)):
                     max_scroll = max(0, len(self.pending_invites) - self._incoming_invites_visible_count())
                     self.pending_invites_scroll = min(max(0, self.pending_invites_scroll - event.y), max_scroll)
                 elif self._chat_panel_rect().collidepoint((mx, my)):
                     self.chat_scroll = min(max(0, self.chat_scroll + event.y), self._chat_max_scroll())
+                elif self._chat_target_rect().collidepoint((mx, my)) or (
+                    self.chat_target_open and self._chat_target_dropdown_rect().collidepoint((mx, my))
+                ):
+                    options = self._chat_target_options()
+                    max_scroll = max(0, len(options) - self._chat_target_visible_count())
+                    self.chat_target_scroll = min(max(0, self.chat_target_scroll - event.y), max_scroll)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    self.return_to_prelobby = True
-                    self.running = False
+                    if self.skin_modal_open:
+                        self._close_skin_modal(commit=False)
+                    else:
+                        self.return_to_prelobby = True
+                        self.running = False
                 elif self.invite_name_focus:
                     if event.key == pygame.K_RETURN:
                         if self._typed_invite_target_valid() and not self._has_outgoing_pending():
@@ -2353,7 +2856,7 @@ class PygameLobbyScene:
         if glow and enabled:
             halo = rect.inflate(8, 8)
             halo_surface = pygame.Surface((halo.width, halo.height), pygame.SRCALPHA)
-            pygame.draw.rect(halo_surface, (72, 214, 152, 95), halo_surface.get_rect(), 2, border_radius=14)
+            pygame.draw.rect(halo_surface, (accent[0], accent[1], accent[2], 95), halo_surface.get_rect(), 2, border_radius=14)
             self.screen.blit(halo_surface, halo.topleft)
         pygame.draw.rect(self.screen, fill, rect, border_radius=14)
         pygame.draw.rect(self.screen, edge, rect, 2, border_radius=14)
@@ -2372,45 +2875,409 @@ class PygameLobbyScene:
     def _draw(self) -> None:
         self.frame += 1
         frame = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        # Global lobby background now matches leaderboard style:
+        # near-black navy + subtle circuit-board traces.
         for y in range(self.h):
             t = y / max(1, self.h - 1)
-            c = lerp_color((9, 28, 44), (8, 20, 34), t)
+            c = lerp_color((5, 16, 28), (4, 12, 22), t)
             pygame.draw.line(frame, c, (0, y), (self.w, y))
 
-        panel = pygame.Rect(24, 24, self.w - 48, self.h - 48)
-        pygame.draw.rect(frame, (12, 30, 48, 226), panel, border_radius=22)
-        pygame.draw.rect(frame, (68, 210, 152), panel, 2, border_radius=22)
+        circuit = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        for y in range(20, self.h, 38):
+            pygame.draw.line(circuit, (42, 112, 110, 20), (14, y), (self.w - 16, y), 1)
+            pygame.draw.circle(circuit, (66, 154, 146, 26), (14, y), 1)
+            pygame.draw.circle(circuit, (66, 154, 146, 26), (self.w - 16, y), 1)
+        for x in range(24, self.w, 52):
+            pygame.draw.line(circuit, (34, 94, 98, 18), (x, 10), (x, self.h - 10), 1)
+        # subtle branch traces
+        for x in range(44, self.w, 120):
+            for y in range(52, self.h, 120):
+                pygame.draw.line(circuit, (44, 126, 122, 22), (x, y), (x + 18, y), 1)
+                pygame.draw.line(circuit, (44, 126, 122, 22), (x + 18, y), (x + 18, y + 14), 1)
+                pygame.draw.circle(circuit, (76, 178, 166, 30), (x + 18, y + 14), 1)
+        frame.blit(circuit, (0, 0))
 
-        title = self.font_title.render("PYTHON ARENA LOBBY", True, (226, 244, 254))
-        subtitle = self.font_small.render(f"Welcome, {self.username}", True, (146, 184, 204))
-        frame.blit(title, (44, 40))
-        frame.blit(subtitle, (46, 82))
+        panel = pygame.Rect(24, 24, self.w - 48, self.h - 48)
+        pygame.draw.rect(frame, (8, 20, 34, 238), panel, border_radius=22)
+        pygame.draw.rect(frame, (34, 208, 150), panel, 2, border_radius=22)
+
+        # Snake-vibe headline with a soft glow/outline
+        title = self.font_snake_title.render("PYTHON ARENA", True, (92, 246, 174))
+        title_glow = self.font_snake_title.render("PYTHON ARENA", True, (28, 104, 88))
+        subtitle = self.font_header_sub.render("LOBBY DEPLOYMENT", True, (206, 232, 248))
+        tx = panel.centerx - title.get_width() // 2
+        title_y = 28
+        frame.blit(title_glow, (tx + 2, title_y + 2))
+        frame.blit(title, (tx, title_y))
+        sx = panel.centerx - subtitle.get_width() // 2
+        subtitle_y = title_y + title.get_height() + 4
+        frame.blit(subtitle, (sx, subtitle_y))
+        line_y = title_y + (title.get_height() // 2) + 2
+        pygame.draw.line(frame, (72, 214, 152), (tx - 120, line_y), (tx - 24, line_y), 2)
+        pygame.draw.line(frame, (72, 214, 152), (tx + title.get_width() + 24, line_y), (tx + title.get_width() + 120, line_y), 2)
 
         lb = self._users_rect()
         center = self._logs_rect()
         players = self._right_rect()
-        for rect in (lb, center, players):
-            pygame.draw.rect(frame, (18, 40, 62, 240), rect, border_radius=14)
-            pygame.draw.rect(frame, (64, 122, 180), rect, 1, border_radius=14)
+        invites_top = self._center_top_rect()
+        left_panel = self._left_panel_rect()
+        def draw_cyber_panel(rect: pygame.Rect, accent: tuple[int, int, int]) -> None:
+            pygame.draw.rect(frame, (10, 24, 40, 238), rect, border_radius=14)
+            glow = pygame.Surface((rect.width + 20, rect.height + 20), pygame.SRCALPHA)
+            pygame.draw.rect(glow, (accent[0], accent[1], accent[2], 42), glow.get_rect(), border_radius=18)
+            frame.blit(glow, (rect.x - 10, rect.y - 10))
+            pygame.draw.rect(frame, accent, rect, 2, border_radius=14)
+
+        draw_cyber_panel(left_panel, (76, 128, 168))
+        draw_cyber_panel(lb, (54, 232, 168))
+        draw_cyber_panel(invites_top, (42, 214, 186))
+        # Left panel background: glass-like faded grid + subtle internal particles
+        pygame.draw.rect(frame, (7, 20, 31, 214), left_panel, border_radius=14)
+        pygame.draw.rect(frame, (56, 218, 212), left_panel, 2, border_radius=14)
+        pygame.draw.rect(frame, (72, 232, 160, 148), left_panel.inflate(-8, -8), 1, border_radius=12)
+
+        # tiny green particles drifting INSIDE the panel (leaderboard-like ambience)
+        inner = left_panel.inflate(-18, -18)
+        particles = 30
+        for i in range(particles):
+            px_seed = (i * 57) % max(1, inner.width)
+            px_jitter = int(6 * math.sin(self.frame * 0.013 + i * 1.9))
+            px = inner.x + px_seed + px_jitter
+            py = inner.y + int(((self.frame * 0.65 + i * 31) % max(1, inner.height)))
+            py = inner.bottom - (py - inner.y)  # drift upward
+            glow = 56 + int(38 * (0.5 + 0.5 * math.sin(self.frame * 0.05 + i)))
+            pygame.draw.circle(frame, (86, 236, 164, glow), (px, py), 1)
+        # Left panel: YOUR SNAKE (centered, snake-vibe title)
+        ys = self.font_snake_panel.render("YOUR SNAKE", True, (156, 226, 246))
+        ys_glow = self.font_snake_panel.render("YOUR SNAKE", True, (42, 92, 108))
+        ys_x = left_panel.centerx - ys.get_width() // 2
+        frame.blit(ys_glow, (ys_x + 1, left_panel.y + 14))
+        frame.blit(ys, (ys_x, left_panel.y + 12))
+
+        # Hologram tint: 75% skin color (brightened) + 25% cyan base
+        _skin_clr = SKIN_COLORS.get(self.current_skin.color, SKIN_COLORS["venom"])
+        _skin_bright = tuple(min(255, c + 80) for c in _skin_clr)
+        holo_rgb = (
+            int(_skin_bright[0] * 0.75 + 80  * 0.25),
+            int(_skin_bright[1] * 0.75 + 190 * 0.25),
+            int(_skin_bright[2] * 0.75 + 255 * 0.25),
+        )
+        holo_rgb_hi = tuple(min(255, c + 55) for c in holo_rgb)
+        holo_cx, holo_cy = left_panel.centerx, left_panel.y + 162
+        # projector platform + hologram beam (volumetric cone, no flat spot)
+        platform = pygame.Rect(holo_cx - 68, holo_cy + 42, 136, 24)
+        pygame.draw.ellipse(frame, (14, 34, 52), platform)
+        pygame.draw.ellipse(frame, (92, 156, 214), platform, 2)
+        pygame.draw.ellipse(frame, (24, 62, 94, 120), platform.inflate(-14, -10))
+
+        beam_h = 118
+        beam = pygame.Surface((140, beam_h), pygame.SRCALPHA)
+        for yb in range(beam_h):
+            t = yb / max(1, beam_h - 1)
+            half_w = int(58 - (t * 38))
+            alpha = int(34 * (1.0 - t))
+            col = (holo_rgb[0], holo_rgb[1], holo_rgb[2], alpha)
+            pygame.draw.line(beam, col, (70 - half_w, beam_h - 1 - yb), (70 + half_w, beam_h - 1 - yb), 1)
+            if yb % 8 == 0:
+                pygame.draw.line(
+                    beam,
+                    (holo_rgb_hi[0], holo_rgb_hi[1], holo_rgb_hi[2], int(alpha * 0.9)),
+                    (70 - half_w + 4, beam_h - 1 - yb),
+                    (70 + half_w - 4, beam_h - 1 - yb),
+                    1,
+                )
+        frame.blit(beam, (holo_cx - 70, holo_cy - 64))
+
+        # floating holo particles
+        for p in range(18):
+            pt = (self.frame * 1.4 + p * 19) % 120
+            px = int(holo_cx + math.sin((self.frame * 0.05) + p) * (10 + (p % 6) * 4))
+            py = int(holo_cy + 40 - pt)
+            pa = max(18, 120 - int(pt))
+            pygame.draw.circle(frame, (holo_rgb[0], holo_rgb[1], holo_rgb[2], pa), (px, py), 1)
+
+        # holographic snake coil (semi-transparent body + scanline accents)
+        seg_count = 22
+        phase = self.frame * 0.028
+        for i in range(seg_count):
+            t = i / max(1, seg_count - 1)
+            # Smoother coil motion (slower, less angular jitter)
+            ang = phase + (t * 6.6)
+            rad = 34 - (t * 16)
+            sway = math.sin(phase + t * 5.2) * 4.2
+            x = int(holo_cx + math.cos(ang) * rad + sway)
+            y = int(holo_cy + math.sin(ang * 0.92) * (10 + t * 7) + t * 26 - 14)
+            r = max(4, int(10 - t * 4))
+            s = pygame.Surface((r * 5, r * 5), pygame.SRCALPHA)
+            pygame.draw.circle(s, (holo_rgb[0], holo_rgb[1], holo_rgb[2], 24), (int(r * 2.5), int(r * 2.5)), r + 3)
+            pygame.draw.circle(s, (holo_rgb[0], holo_rgb[1], holo_rgb[2], 150), (int(r * 2.5), int(r * 2.5)), r)
+            # scanline slit over each segment
+            if i % 2 == 0:
+                pygame.draw.line(s, (245, 252, 255, 112), (int(r * 1.2), int(r * 2.5)), (int(r * 3.8), int(r * 2.5)), 1)
+            frame.blit(s, (x - int(r * 2.5), y - int(r * 2.5)))
+
+        # keep this area visually clean (no selected-label text)
+
+        # CHANGE SKIN medallion button (reference-style, reactive)
+        skin_action = self._skin_change_action_rect()
+        mouse_pos = pygame.mouse.get_pos()
+        hover = skin_action.collidepoint(mouse_pos)
+        pressed = hover and pygame.mouse.get_pressed()[0]
+
+        pulse = 0.5 + 0.5 * math.sin(self.frame * 0.07)
+        glow_alpha = 70 + int(60 * pulse) + (28 if hover else 0)
+
+        head = self.font_orbitron.render("CHANGE SKIN", True, (236, 246, 252))
+        head_x = skin_action.centerx - head.get_width() // 2
+        frame.blit(head, (head_x, skin_action.y - 30))
+
+        # Medallion
+        med_cx = skin_action.centerx
+        med_cy = skin_action.y + 48
+        med_r = 40 + (2 if hover else 0) - (1 if pressed else 0)
+        pygame.draw.circle(frame, (28, 42, 54), (med_cx, med_cy), med_r + 8)
+        pygame.draw.circle(frame, (164, 176, 188), (med_cx, med_cy), med_r + 6)
+        pygame.draw.circle(frame, (112, 122, 132), (med_cx, med_cy), med_r + 3, 2)
+        pygame.draw.circle(frame, (26, 34, 44), (med_cx, med_cy), med_r)
+
+        # User-provided snake icon (holographic cyan tint)
+        if self.change_skin_icon is not None:
+            icon_size = int(med_r * 1.72)
+            base_icon = pygame.transform.smoothscale(self.change_skin_icon, (icon_size, icon_size))
+            icon = base_icon.copy()
+            # tint to skin-derived hologram palette
+            icon.fill((holo_rgb[0], holo_rgb[1], holo_rgb[2], 255), special_flags=pygame.BLEND_RGBA_MULT)
+            icon.fill((16, 48, 80, 0), special_flags=pygame.BLEND_RGBA_ADD)
+            # soft glow silhouette behind icon
+            glow_icon = pygame.transform.smoothscale(icon, (icon_size + 8, icon_size + 8))
+            glow_icon.fill((86, 214, 248, 84), special_flags=pygame.BLEND_RGBA_MULT)
+            frame.blit(glow_icon, (med_cx - glow_icon.get_width() // 2, med_cy - glow_icon.get_height() // 2))
+            frame.blit(icon, (med_cx - icon.get_width() // 2, med_cy - icon.get_height() // 2))
+        else:
+            serp = pygame.Surface((med_r * 2 + 6, med_r * 2 + 6), pygame.SRCALPHA)
+            pts = [
+                (med_r + 2, 7),
+                (med_r - 7, 13),
+                (med_r - 4, 19),
+                (med_r + 5, 24),
+                (med_r + 9, 30),
+                (med_r + 1, 36),
+                (med_r - 8, 42),
+            ]
+            pygame.draw.lines(serp, (132, 242, 252, 250), False, pts, 5)
+            pygame.draw.lines(serp, (70, 186, 202, 230), False, pts, 2)
+            pygame.draw.circle(serp, (152, 246, 255, 255), (med_r + 2, 7), 4)
+            pygame.draw.circle(serp, (14, 34, 44, 255), (med_r + 3, 6), 1)
+            frame.blit(serp, (med_cx - serp.get_width() // 2, med_cy - serp.get_height() // 2))
+
+        # removed extra sub-copy and decorative frame per request
+
+        # Right column visual overhaul: premium cyber leaderboard + invitations
+        neon_outer = (56, 218, 212)
+        neon_inner = (72, 232, 160)
+        panel_bg = (8, 24, 36, 240)
+        row_bg = (20, 44, 68)
+        col_label = (118, 204, 212)
+        value_mint = (122, 252, 184)
+        gold_title = (246, 203, 112)
+        invites_area = self._incoming_invites_area_rect()
+        invites_title_y = invites_area.y - 44
+        invites_panel = pygame.Rect(invites_top.x, invites_top.y, invites_top.width, invites_top.height)
+
+        def draw_neon_panel(
+            rect: pygame.Rect,
+            dim: bool = False,
+            with_brackets: bool = True,
+            with_inner_line: bool = True,
+        ) -> None:
+            bg = (7, 20, 31, 226) if dim else panel_bg
+            pygame.draw.rect(frame, bg, rect, border_radius=14)
+            glow = pygame.Surface((rect.width + 24, rect.height + 24), pygame.SRCALPHA)
+            glow_col = (neon_outer[0], neon_outer[1], neon_outer[2], 36 if dim else 52)
+            pygame.draw.rect(glow, glow_col, glow.get_rect(), 2, border_radius=18)
+            frame.blit(glow, (rect.x - 12, rect.y - 12))
+            pygame.draw.rect(frame, neon_outer, rect, 2, border_radius=14)
+            if with_inner_line:
+                inner = rect.inflate(-8, -8)
+                pygame.draw.rect(frame, (*neon_inner, 190 if dim else 230), inner, 1, border_radius=12)
+            if with_brackets:
+                # corner tech brackets
+                br = 14
+                off = 7
+                for x0, y0, sx, sy in (
+                    (rect.left + off, rect.top + off, 1, 1),
+                    (rect.right - off, rect.top + off, -1, 1),
+                    (rect.left + off, rect.bottom - off, 1, -1),
+                    (rect.right - off, rect.bottom - off, -1, -1),
+                ):
+                    pygame.draw.line(frame, neon_inner, (x0, y0), (x0 + sx * br, y0), 2)
+                    pygame.draw.line(frame, neon_inner, (x0, y0), (x0, y0 + sy * br), 2)
+
+        draw_neon_panel(lb, dim=False, with_brackets=False)
+        draw_neon_panel(invites_panel, dim=True, with_brackets=False)
+        draw_neon_panel(players, dim=False, with_brackets=False, with_inner_line=False)
+
+        # Online panel restrained by serpent-chain links (dark metallic look)
+        chain_layer = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        chain_col = (44, 118, 74, 220)
+        chain_hi = (86, 178, 118, 210)
+        chain_shadow = (16, 44, 30, 185)
+
+        def draw_serpent_chain_between(a: tuple[int, int], b: tuple[int, int], bend: float = 0.0) -> None:
+            x0, y0 = float(a[0]), float(a[1])
+            x1, y1 = float(b[0]), float(b[1])
+            vx, vy = (x1 - x0), (y1 - y0)
+            dist = max(1.0, math.hypot(vx, vy))
+            dx, dy = (vx / dist), (vy / dist)
+            ang = math.degrees(math.atan2(dy, dx))
+            nx, ny = (-dy, dx)
+            step = 13.0
+            links = max(4, int(dist / step))
+            link_w = 16
+            link_h = 10
+            prev: tuple[int, int] | None = None
+            for i in range(links):
+                t = i / max(1, links - 1)
+                # slight organic wobble to feel like snake-segment chain
+                wobble = math.sin((self.frame * 0.03) + i * 0.8) * 1.5
+                # bow the chain so corner chains don't look like center chain
+                arc = (1.0 - abs((t * 2.0) - 1.0)) * bend
+                cx = int(x0 + dx * (t * dist) + nx * (wobble + arc))
+                cy = int(y0 + dy * (t * dist) + ny * (wobble + arc))
+                if prev is not None:
+                    pygame.draw.line(chain_layer, chain_shadow, (prev[0] + 1, prev[1] + 1), (cx + 1, cy + 1), 8)
+                    pygame.draw.line(chain_layer, chain_col, prev, (cx, cy), 7)
+                    pygame.draw.line(chain_layer, (102, 170, 128, 180), prev, (cx, cy), 2)
+
+                # build one snake-segment "link"
+                seg = pygame.Surface((link_w + 6, link_h + 6), pygame.SRCALPHA)
+                body_rect = pygame.Rect(2, 2, link_w, link_h)
+                pygame.draw.ellipse(seg, chain_shadow, body_rect.move(1, 1))
+                pygame.draw.ellipse(seg, chain_col, body_rect)
+                pygame.draw.ellipse(seg, (26, 70, 44, 188), body_rect.inflate(-4, -4))
+                # dorsal highlight
+                pygame.draw.ellipse(seg, chain_hi, pygame.Rect(body_rect.x + 2, body_rect.y + 1, link_w - 7, max(3, link_h - 5)))
+                # tiny scale cuts
+                for s in range(3):
+                    sx = body_rect.x + 3 + s * 4
+                    pygame.draw.arc(seg, (20, 52, 34, 180), pygame.Rect(sx, body_rect.y + 3, 5, 4), 0.2, 2.8, 1)
+
+                seg_rot = pygame.transform.rotate(seg, -ang)
+                seg_rect = seg_rot.get_rect(center=(cx, cy))
+                chain_layer.blit(seg_rot, seg_rect.topleft)
+                prev = (cx, cy)
+
+        # Exactly 6 restraint chains:
+        # 3 top anchors from GLOBAL LEADERBOARD lower green border
+        # 3 bottom anchors from bottom green barrier of the main frame
+        top_y = lb.bottom - 2
+        bottom_y = panel.bottom - 2
+
+        top_anchors = [
+            (lb.left + 8, top_y),
+            (lb.centerx, top_y),
+            (lb.right - 8, top_y),
+        ]
+        bottom_anchors = [
+            (players.left - 28, bottom_y),
+            (players.centerx, bottom_y),
+            (panel.right - 8, bottom_y),
+        ]
+
+        top_targets = [
+            (players.left + 8, players.top + 2),
+            (players.centerx, players.top + 2),
+            (players.right - 8, players.top + 2),
+        ]
+        bottom_targets = [
+            (players.left + 8, players.bottom - 2),
+            (players.centerx, players.bottom - 2),
+            (players.right - 8, players.bottom - 2),
+        ]
+
+        draw_serpent_chain_between(top_anchors[0], top_targets[0], bend=10.0)   # top-left bends left
+        draw_serpent_chain_between(top_anchors[1], top_targets[1], bend=0.0)    # top-middle straight
+        draw_serpent_chain_between(top_anchors[2], top_targets[2], bend=-10.0)  # top-right bends right
+        draw_serpent_chain_between(bottom_anchors[0], bottom_targets[0], bend=-10.0)  # bottom-left bends left
+        draw_serpent_chain_between(bottom_anchors[1], bottom_targets[1], bend=0.0)    # bottom-middle straight
+        draw_serpent_chain_between(bottom_anchors[2], bottom_targets[2], bend=10.0)   # bottom-right bends right
+        frame.blit(chain_layer, (0, 0))
+
+        # Online panel header (drawn after panel so title is always visible)
+        header = self._online_header_rect()
+        pygame.draw.rect(frame, (10, 30, 48), header, border_radius=10)
+        pygame.draw.rect(frame, (72, 232, 160), header, 1, border_radius=10)
+        online_title = self.font_body.render(f"ONLINE PLAYERS - {len(self.online_users)}", True, (82, 232, 208))
+        # center the title a bit more while leaving space for the chevron
+        title_x = header.x + ((header.width - 34) - online_title.get_width()) // 2 + 8
+        frame.blit(online_title, (title_x, players.y + 12))
+        # Fixed-position chevron: same size/anchor in both states, only inverted.
+        cx = players.right - 20
+        cy = players.y + 22
+        w = 6
+        h = 4
+        if self.players_expand_t > 0.2:
+            # down
+            pygame.draw.line(frame, (132, 232, 176), (cx - w, cy - h), (cx, cy + h), 2)
+            pygame.draw.line(frame, (132, 232, 176), (cx, cy + h), (cx + w, cy - h), 2)
+        else:
+            # up
+            pygame.draw.line(frame, (132, 232, 176), (cx - w, cy + h), (cx, cy - h), 2)
+            pygame.draw.line(frame, (132, 232, 176), (cx, cy - h), (cx + w, cy + h), 2)
+
+        # subtle circuit lines inside right column panels
+        for panel_rect, alpha in ((lb, 22), (invites_panel, 16)):
+            tex = pygame.Surface((panel_rect.width, panel_rect.height), pygame.SRCALPHA)
+            for y in range(16, panel_rect.height, 34):
+                pygame.draw.line(tex, (44, 116, 112, alpha), (10, y), (panel_rect.width - 14, y), 1)
+                pygame.draw.circle(tex, (66, 154, 146, alpha + 8), (12, y), 1)
+                pygame.draw.circle(tex, (66, 154, 146, alpha + 8), (panel_rect.width - 14, y), 1)
+            for x in range(18, panel_rect.width, 46):
+                pygame.draw.line(tex, (38, 102, 104, alpha), (x, 8), (x, panel_rect.height - 10), 1)
+            frame.blit(tex, panel_rect.topleft)
+
+        # optional subtle sweep + particles
+        sweep_y = lb.y + 32 + ((self.frame * 2) % max(1, lb.height - 56))
+        pygame.draw.line(frame, (90, 230, 220, 48), (lb.x + 10, sweep_y), (lb.right - 10, sweep_y), 1)
+        for i in range(5):
+            px = lb.x + 22 + ((self.frame * (i + 2) + i * 53) % max(40, lb.width - 44))
+            py = lb.y + 40 + ((self.frame + i * 37) % max(40, lb.height - 56))
+            pygame.draw.circle(frame, (96, 236, 186, 50), (px, py), 1)
+
         if self.cup_icon is not None:
-            cup = self._prepare_icon_transparent_bg(self.cup_icon, (24, 24))
+            cup = self._prepare_icon_transparent_bg(self.cup_icon, (22, 22))
             frame.blit(cup, (lb.x + 12, lb.y + 10))
-            leaderboard_x = lb.x + 44
+            leaderboard_x = lb.x + 42
         else:
             leaderboard_x = lb.x + 14
-        frame.blit(self.font_body.render("Leaderboard", True, (246, 203, 112)), (leaderboard_x, lb.y + 12))
-        frame.blit(self.font_body.render("Arena Room", True, (96, 228, 168)), (center.x + 14, center.y + 12))
-        frame.blit(self.font_body.render("Online Players", True, (96, 228, 168)), (players.x + 14, players.y + 12))
+            frame.blit(self.font_body.render("ðŸ†", True, gold_title), (lb.x + 12, lb.y + 10))
+            leaderboard_x = lb.x + 42
+        frame.blit(self.font_body.render("GLOBAL LEADERBOARD", True, gold_title), (leaderboard_x, lb.y + 12))
+
+        frame.blit(self.font_body.render("INVITATIONS", True, (86, 214, 188)), (invites_area.x + 2, invites_title_y))
+        pending_label = f"PENDING INVITES ({len(self.pending_invites)})"
+        frame.blit(self.font_tiny.render(pending_label, True, (170, 202, 216)), (invites_area.x + 10, invites_title_y + 24))
+        if self.pending_invites:
+            badge_center = (invites_area.right - 14, invites_title_y + 12)
+            pygame.draw.circle(frame, (224, 78, 92), badge_center, 8)
+            badge = self.font_tiny.render(str(len(self.pending_invites)), True, (255, 255, 255))
+            frame.blit(badge, badge.get_rect(center=badge_center))
 
         ranked = self._ranked_players()
-        # Gold column label above score values to clarify metric.
-        frame.blit(self.font_tiny.render("Wins", True, (246, 203, 112)), (lb.right - 44, lb.y + 32))
+        row_x = lb.x + 10
+        player_col_x = row_x + 38
+        wins_value_x = lb.right - 100
+        wins_header_x = wins_value_x - 8
+        frame.blit(self.font_tiny.render("PLAYER", True, col_label), (player_col_x, lb.y + 42))
+        frame.blit(self.font_tiny.render("WINS", True, col_label), (wins_header_x, lb.y + 42))
         shown_ranked = ranked[self.leaderboard_scroll : self.leaderboard_scroll + 10]
-        y0 = lb.y + 50
+        y0 = lb.y + 62
         for i, (user, wins) in enumerate(shown_ranked):
             rank_no = self.leaderboard_scroll + i + 1
-            row = pygame.Rect(lb.x + 10, y0 + i * 28, lb.width - 20, 24)
-            pygame.draw.rect(frame, (24, 50, 76), row, border_radius=6)
+            row = pygame.Rect(row_x, y0 + i * 28, lb.width - 20, 24)
+            pygame.draw.rect(frame, row_bg, row, border_radius=7)
+            pygame.draw.rect(frame, (66, 124, 162), row, 1, border_radius=7)
+            pygame.draw.rect(frame, (94, 244, 194, 20), row.inflate(-2, -2), 1, border_radius=6)
             icon: pygame.Surface | None = None
             if rank_no == 1:
                 icon = self.rank1_icon
@@ -2424,9 +3291,15 @@ class PygameLobbyScene:
                 badge = self._prepare_icon_transparent_bg(icon, (18, 18))
                 frame.blit(badge, (row.x + 6, row.y + 3))
                 name_x = row.x + 28
+            elif rank_no <= 3:
+                badge_col = (240, 184, 74) if rank_no == 1 else ((200, 212, 226) if rank_no == 2 else (198, 132, 86))
+                pygame.draw.circle(frame, badge_col, (row.x + 14, row.y + 12), 8)
+                pygame.draw.circle(frame, (18, 40, 62), (row.x + 14, row.y + 12), 4)
+                pygame.draw.circle(frame, (255, 248, 230), (row.x + 14, row.y + 12), 2)
+                name_x = row.x + 28
 
-            frame.blit(self.font_tiny.render(user, True, (230, 240, 252)), (name_x, row.y + 5))
-            frame.blit(self.font_tiny.render(f"{wins}", True, (132, 224, 162)), (row.right - 24, row.y + 5))
+            frame.blit(self.font_tiny.render(user[:12], True, (230, 240, 252)), (name_x + 14, row.y + 5))
+            frame.blit(self.font_tiny.render(f"{wins}", True, value_mint), (wins_value_x, row.y + 5))
 
         invite_name_rect = self._invite_by_name_rect()
         pygame.draw.rect(frame, (22, 42, 66), invite_name_rect, border_radius=10)
@@ -2469,12 +3342,31 @@ class PygameLobbyScene:
         for username, confirmed, item_rect, cancel_rect in self._outgoing_pending_item_rects():
             pygame.draw.rect(frame, (24, 56, 86), item_rect, border_radius=8)
             pygame.draw.rect(frame, (84, 140, 188), item_rect, 1, border_radius=8)
-            frame.blit(self.font_tiny.render(username[:14], True, (232, 242, 252)), (item_rect.x + 8, item_rect.y + 5))
-            pending_x = item_rect.x + 8 + self.font_tiny.size(username[:14])[0] + 8
+            # Reserve right side for cancel button and keep status text from colliding.
+            left_x = item_rect.x + 8
             status_text = "pending" if confirmed else "sending"
             status_color = (248, 206, 124) if confirmed else (166, 210, 246)
-            frame.blit(self.font_tiny.render(status_text, True, status_color), (pending_x, item_rect.y + 5))
-            dot_base_x = pending_x + self.font_tiny.size("pending")[0] + 4
+            dots_w = 3 * 7
+            # Keep dots always visible by anchoring them right before Cancel.
+            dot_base_x = cancel_rect.x - 8 - dots_w
+            max_name_w = max(34, dot_base_x - left_x - 58)
+            name_txt = username
+            while self.font_tiny.size(name_txt)[0] > max_name_w and len(name_txt) > 3:
+                name_txt = name_txt[:-1]
+            if name_txt != username:
+                if len(name_txt) >= 2:
+                    name_txt = name_txt[:-2] + ".."
+            frame.blit(self.font_tiny.render(name_txt, True, (232, 242, 252)), (left_x, item_rect.y + 5))
+            pending_x = left_x + self.font_tiny.size(name_txt)[0] + 8
+            status_w = self.font_tiny.size(status_text)[0]
+            # If needed, use shorter status so dots remain visible.
+            if pending_x + status_w > dot_base_x - 4:
+                status_text = "pend" if confirmed else "send"
+                status_w = self.font_tiny.size(status_text)[0]
+            if pending_x + status_w > dot_base_x - 4:
+                status_text = ""
+            if status_text:
+                frame.blit(self.font_tiny.render(status_text, True, status_color), (pending_x, item_rect.y + 5))
             dot_center_y = item_rect.y + item_rect.height // 2 + 1
             for idx in range(3):
                 phase = (self.frame * 0.25) + (idx * 0.9)
@@ -2482,24 +3374,25 @@ class PygameLobbyScene:
                 pygame.draw.circle(frame, status_color, (dot_base_x + idx * 7, dot_center_y + y_offset), 2)
             pygame.draw.rect(frame, (82, 44, 50), cancel_rect, border_radius=7)
             pygame.draw.rect(frame, (236, 132, 140), cancel_rect, 1, border_radius=7)
-            frame.blit(self.font_tiny.render("Cancel", True, (250, 236, 238)), (cancel_rect.x + 7, cancel_rect.y + 3))
+            cancel_txt = self.font_tiny.render("Cancel", True, (250, 236, 238))
+            frame.blit(cancel_txt, cancel_txt.get_rect(center=cancel_rect.center))
 
-        invites_area = self._incoming_invites_area_rect()
-        pygame.draw.rect(frame, (14, 34, 54), invites_area, border_radius=10)
-        pygame.draw.rect(frame, (62, 108, 148), invites_area, 1, border_radius=10)
+        pygame.draw.rect(frame, (10, 30, 48), invites_area, border_radius=10)
+        pygame.draw.rect(frame, (54, 118, 146), invites_area, 1, border_radius=10)
         shown_invites = self._visible_pending_invites()
         old_clip = frame.get_clip()
         frame.set_clip(invites_area.inflate(-2, -2))
         for i, inviter in enumerate(shown_invites):
             card = self._incoming_invite_card_rect(i)
-            pygame.draw.rect(frame, (24, 50, 76), card, border_radius=10)
-            pygame.draw.rect(frame, (86, 142, 194), card, 1, border_radius=10)
-            frame.blit(self.font_tiny.render(f"Invite from {inviter}", True, (248, 202, 124)), (card.x + 10, card.y + 10))
+            pygame.draw.rect(frame, (18, 44, 66), card, border_radius=10)
+            pygame.draw.rect(frame, (72, 138, 168), card, 1, border_radius=10)
+            pygame.draw.rect(frame, (92, 214, 174, 18), card.inflate(-2, -2), 1, border_radius=9)
+            frame.blit(self.font_tiny.render(f"Invite from {inviter}", True, (236, 194, 110)), (card.x + 10, card.y + 10))
             accept_rect = pygame.Rect(card.right - 154, card.bottom - 28, 68, 22)
             reject_rect = pygame.Rect(card.right - 78, card.bottom - 28, 68, 22)
-            pygame.draw.rect(frame, (32, 84, 60), accept_rect, border_radius=8)
-            pygame.draw.rect(frame, (84, 212, 148), accept_rect, 1, border_radius=8)
-            pygame.draw.rect(frame, (84, 40, 50), reject_rect, border_radius=8)
+            pygame.draw.rect(frame, (24, 78, 62), accept_rect, border_radius=8)
+            pygame.draw.rect(frame, (84, 220, 162), accept_rect, 1, border_radius=8)
+            pygame.draw.rect(frame, (86, 34, 48), reject_rect, border_radius=8)
             pygame.draw.rect(frame, (236, 122, 132), reject_rect, 1, border_radius=8)
             frame.blit(self.font_tiny.render("Accept", True, (236, 248, 240)), (accept_rect.x + 12, accept_rect.y + 4))
             frame.blit(self.font_tiny.render("Reject", True, (255, 232, 236)), (reject_rect.x + 14, reject_rect.y + 4))
@@ -2526,16 +3419,6 @@ class PygameLobbyScene:
         chat_area = self._chat_panel_rect()
         pygame.draw.rect(frame, (12, 28, 46), chat_area, border_radius=10)
         pygame.draw.rect(frame, (54, 102, 146), chat_area, 1, border_radius=10)
-        public_tab, private_tabs = self._chat_tabs_layout(chat_area)
-        public_active = self.chat_mode == "public"
-        pygame.draw.rect(frame, (30, 78, 110) if public_active else (24, 46, 70), public_tab, border_radius=8)
-        pygame.draw.rect(frame, (84, 212, 164) if public_active else (76, 116, 154), public_tab, 1, border_radius=8)
-        frame.blit(self.font_tiny.render("Lobby Chat", True, (236, 246, 255)), (public_tab.x + 10, public_tab.y + 5))
-        for partner, tab_rect in private_tabs:
-            is_active_tab = self.chat_mode == "private" and self.active_private_target == partner
-            pygame.draw.rect(frame, (34, 84, 122) if is_active_tab else (22, 52, 78), tab_rect, border_radius=8)
-            pygame.draw.rect(frame, (90, 220, 170) if is_active_tab else (78, 120, 160), tab_rect, 1, border_radius=8)
-            frame.blit(self.font_tiny.render(partner[:14], True, (230, 242, 252)), (tab_rect.x + 8, tab_rect.y + 5))
 
         show_chat_scrollbar = self._chat_max_scroll() > 0
         bubble_area = pygame.Rect(
@@ -2585,34 +3468,51 @@ class PygameLobbyScene:
             if thumb is not None:
                 pygame.draw.rect(frame, (122, 156, 192), thumb, border_radius=4)
 
-        if self.pending_invites:
-            badge_center = (players.right - 18, players.y + 18)
-            pygame.draw.circle(frame, (238, 92, 92), badge_center, 9)
-            badge = self.font_tiny.render(str(len(self.pending_invites)), True, (255, 255, 255))
-            frame.blit(badge, badge.get_rect(center=badge_center))
-
-        players_y = players.y + 44
-        shown_players = self.online_users[self.players_scroll : self.players_scroll + 14]
-        for i, user in enumerate(shown_players):
-            idx = self.players_scroll + i
-            row = self._player_row_rect(i)
-            selected = idx == self.selected_index
-            pygame.draw.rect(frame, (34, 84, 122) if selected else (24, 50, 76), row, border_radius=8)
-            label = f"{user} (You)" if user.casefold() == self.username.casefold() else user
-            text_color = (236, 245, 255)
-            frame.blit(self.font_tiny.render(label, True, text_color), (row.x + 8, row.y + 6))
-            if user.casefold() != self.username.casefold():
-                eye_rect = self._player_eye_rect(row)
-                if user not in self.idle_users and self.eye_icon is not None:
-                    eye = self._prepare_icon_transparent_bg(self.eye_icon, (18, 18))
-                    frame.blit(eye, eye_rect.topleft)
-                elif user not in self.idle_users:
-                    pygame.draw.ellipse(frame, (132, 232, 174), eye_rect, 2)
-                    pupil = pygame.Rect(eye_rect.x + 7, eye_rect.y + 5, 4, 8)
-                    pygame.draw.ellipse(frame, (132, 232, 174), pupil)
+        if self.players_expand_t > 0.25:
+            visible_players = self._players_visible_count()
+            shown_players = self.online_users[self.players_scroll : self.players_scroll + visible_players]
+            for i, user in enumerate(shown_players):
+                idx = self.players_scroll + i
+                row = self._player_row_rect(i)
+                selected = idx == self.selected_index
+                pygame.draw.rect(frame, (20, 52, 78), row, border_radius=8)
+                pygame.draw.rect(frame, (84, 220, 176) if selected else (78, 128, 170), row, 1, border_radius=8)
+                icon_box = pygame.Rect(row.x + 8, row.y + 6, 20, 20)
+                pygame.draw.rect(frame, (14, 38, 60), icon_box, border_radius=6)
+                pygame.draw.rect(frame, (74, 190, 160), icon_box, 1, border_radius=6)
+                label = f"{user} (You)" if user.casefold() == self.username.casefold() else user
+                short_label = (label[:16] + "...") if len(label) > 16 else label
+                frame.blit(self.font_small.render(short_label, True, (232, 242, 252)), (row.x + 34, row.y + 6))
+                if user.casefold() != self.username.casefold():
+                    eye_rect = self._player_eye_rect(row)
+                    if user not in self.idle_users and self.eye_icon is not None:
+                        eye = self._prepare_icon_transparent_bg(self.eye_icon, (18, 18))
+                        frame.blit(eye, eye_rect.topleft)
+                    elif user not in self.idle_users:
+                        pygame.draw.ellipse(frame, (132, 232, 174), eye_rect, 2)
+                        pupil = pygame.Rect(eye_rect.x + 7, eye_rect.y + 5, 4, 8)
+                        pygame.draw.ellipse(frame, (132, 232, 174), pupil)
+            if len(self.online_users) > visible_players:
+                up, down, track = self._players_scrollbar_parts()
+                pygame.draw.rect(frame, (22, 44, 70), up, border_radius=4)
+                pygame.draw.rect(frame, (22, 44, 70), down, border_radius=4)
+                pygame.draw.rect(frame, (34, 60, 90), track, border_radius=6)
+                pygame.draw.polygon(
+                    frame,
+                    (118, 156, 194),
+                    [(up.centerx, up.y + 4), (up.x + 4, up.bottom - 4), (up.right - 4, up.bottom - 4)],
+                )
+                pygame.draw.polygon(
+                    frame,
+                    (118, 156, 194),
+                    [(down.x + 4, down.y + 4), (down.right - 4, down.y + 4), (down.centerx, down.bottom - 4)],
+                )
+                pthumb = self._players_scroll_thumb_rect()
+                if pthumb is not None:
+                    pygame.draw.rect(frame, (122, 156, 192), pthumb, border_radius=4)
 
         self.screen.blit(frame, (0, 0))
-        can_invite_by_name = self._typed_invite_target_valid() and not self._has_outgoing_pending()
+        can_invite_by_name = self._typed_invite_target_valid() and not self._has_outgoing_pending() and not self.quick_match_waiting
         self._draw_button(
             self._invite_by_name_send_rect(),
             "INVITE",
@@ -2620,7 +3520,8 @@ class PygameLobbyScene:
             enabled=can_invite_by_name,
             glow=can_invite_by_name,
         )
-        self._draw_button(self._disconnect_button_rect(), "Back To PreLobby", accent=(238, 128, 128))
+        self._draw_button(self._quick_match_rect(), "QUICK MATCH", accent=(72, 236, 160), glow=True)
+        self._draw_button(self._disconnect_button_rect(), "QUIT GAME", accent=(238, 96, 108), glow=True)
         chat_rect = self._chat_rect()
         pygame.draw.rect(self.screen, (22, 42, 66), chat_rect, border_radius=12)
         pygame.draw.rect(
@@ -2637,6 +3538,47 @@ class PygameLobbyScene:
             chat_hint = "Private chat: select a player first."
             chat_color = (146, 122, 122)
         self.screen.blit(self.font_small.render(chat_hint, True, chat_color), (chat_rect.x + 12, chat_rect.y + 8))
+        target_rect = self._chat_target_rect()
+        pygame.draw.rect(self.screen, (22, 42, 66), target_rect, border_radius=12)
+        pygame.draw.rect(self.screen, (84, 132, 170), target_rect, 2, border_radius=12)
+        target_label = self._chat_target_label()
+        target_text = self.font_tiny.render(target_label[:15], True, (228, 240, 252))
+        self.screen.blit(target_text, (target_rect.x + 10, target_rect.y + 9))
+        pygame.draw.polygon(
+            self.screen,
+            (132, 232, 176),
+            [
+                (target_rect.right - 16, target_rect.y + 12),
+                (target_rect.right - 8, target_rect.y + 12),
+                (target_rect.right - 12, target_rect.y + 18),
+            ],
+        )
+        if self.chat_target_open:
+            dd = self._chat_target_dropdown_rect()
+            pygame.draw.rect(self.screen, (14, 34, 54), dd, border_radius=8)
+            pygame.draw.rect(self.screen, (84, 132, 170), dd, 1, border_radius=8)
+            options = self._chat_target_options()
+            start = self.chat_target_scroll
+            shown = options[start : start + self._chat_target_visible_count()]
+            for i, opt in enumerate(shown):
+                r = self._chat_target_option_rect(i)
+                active = opt == target_label
+                pygame.draw.rect(self.screen, (28, 70, 98) if active else (20, 46, 70), r, border_radius=6)
+                pygame.draw.rect(self.screen, (84, 212, 164) if active else (74, 114, 154), r, 1, border_radius=6)
+                self.screen.blit(self.font_tiny.render(opt[:16], True, (232, 244, 252)), (r.x + 8, r.y + 6))
+        self._draw_button(self._chat_send_rect(), "ENTER", accent=(72, 214, 152), enabled=self._is_chat_enabled(), glow=self._is_chat_enabled())
+
+        if self.quick_match_waiting and not self.start_game:
+            pop_w, pop_h = 420, 82
+            pop = pygame.Rect((self.w - pop_w) // 2, self.h - pop_h - 22, pop_w, pop_h)
+            pygame.draw.rect(self.screen, (14, 34, 54), pop, border_radius=14)
+            pygame.draw.rect(self.screen, (86, 224, 168), pop, 2, border_radius=14)
+            dots = [".", "..", "..."]
+            dot_index = (self.frame // 20) % 3
+            msg = f"Waiting for other player{dots[dot_index]}"
+            txt = self.font_small.render(msg, True, (230, 246, 238))
+            self.screen.blit(txt, txt.get_rect(center=(pop.centerx - 40, pop.centery)))
+            self._draw_button(self._quick_match_cancel_rect(), "CANCEL", accent=(236, 112, 124), glow=True)
 
         if self.player_popup_target is not None:
             popup = self._player_popup_rect()
@@ -2653,7 +3595,7 @@ class PygameLobbyScene:
                 self.font_tiny.render("Choose action", True, (160, 192, 220)),
                 (popup.x + 16, popup.y + 48),
             )
-            can_popup_invite = not self._has_outgoing_pending()
+            can_popup_invite = not self._has_outgoing_pending() and not self.quick_match_waiting
             self._draw_button(
                 self._player_popup_invite_rect(),
                 "Invite",
@@ -2663,17 +3605,27 @@ class PygameLobbyScene:
             )
             self._draw_button(self._player_popup_chat_rect(), "Chat", accent=(92, 186, 246))
             self._draw_button(self._player_popup_close_rect(), "Close", accent=(236, 132, 132))
+        if self.skin_modal_open:
+            self._draw_skin_modal(self.screen)
         pygame.display.flip()
 
-    def run(self) -> tuple[bool, bool, bool, str | None]:
+    def run(self) -> tuple[bool, bool, bool, str | None, dict[str, dict[str, str]]]:
         while self.running:
             self._events()
             self._drain_queue()
             self._retry_username_if_due()
+            self._retry_quick_match_if_due()
+            self._update_ui_animations()
             self._draw()
             self.clock.tick(FPS)
         self._disconnect()
-        return self.return_to_prelobby, self.quit_app, self.start_game, self.start_game_opponent
+        return (
+            self.return_to_prelobby,
+            self.quit_app,
+            self.start_game,
+            self.start_game_opponent,
+            self.match_skins,
+        )
 
 
 def run_prelobby_to_lobby(
@@ -2719,7 +3671,7 @@ def run_prelobby_to_lobby(
             server_ip=server_ip,
             server_port=server_port,
         )
-        back_to_prelobby, quit_app, start_game, opponent = lobby.run()
+        back_to_prelobby, quit_app, start_game, opponent, match_skins = lobby.run()
         if quit_app:
             pygame.quit()
             return
@@ -2734,6 +3686,8 @@ def run_prelobby_to_lobby(
                 preferred_opponent=opponent,
                 return_to_tk_lobby=False,
                 keep_window_open_on_return=True,
+                initial_skin=skin_to_dict(lobby.current_skin),
+                initial_match_skins=match_skins,
             )
             if requested_lobby_return:
                 resume_lobby_username = username

@@ -97,6 +97,86 @@ def _handle_invitation_message(
         send_message(client_socket, make_error_message("Username must be set before invitations."))
         return
 
+    if action == "quick_match":
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Quick Match sender mismatch."))
+            return
+
+        success, reason, opponent, game_id = server_state.request_quick_match(from_user)
+        if not success:
+            reason_to_error = {
+                "user_offline": "Quick Match failed: user offline.",
+                "user_in_match": "You are already in a match.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Quick Match failed.")))
+            return
+
+        if reason in {"waiting", "already_waiting"}:
+            send_message(
+                client_socket,
+                make_invitation_message(
+                    from_user="SERVER",
+                    to_user=sender_username,
+                    action="waiting",
+                ),
+            )
+            return
+
+        if reason == "matched" and game_id is not None and opponent is not None:
+            p1_socket = server_state.get_socket_for_username(opponent)
+            p2_socket = server_state.get_socket_for_username(sender_username)
+            match_skins = {
+                opponent: server_state.get_skin_dict_for_username(opponent),
+                sender_username: server_state.get_skin_dict_for_username(sender_username),
+            }
+            start_message = make_invitation_message(
+                from_user=opponent,
+                to_user=sender_username,
+                action="match_started",
+                game_id=game_id,
+                skins=match_skins,
+            )
+            for sock in [p1_socket, p2_socket]:
+                if sock is None:
+                    continue
+                try:
+                    send_message(sock, start_message)
+                except OSError:
+                    continue
+
+            initial_state = server_state.get_match_state_dict(game_id)
+            if initial_state is not None:
+                game_state_message = make_game_state_message(game_id=game_id, state=initial_state)
+                for sock in [p1_socket, p2_socket]:
+                    if sock is None:
+                        continue
+                    try:
+                        send_message(sock, game_state_message)
+                    except OSError:
+                        continue
+            return
+
+    if action == "quick_cancel":
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Quick Match cancel sender mismatch."))
+            return
+        success, reason = server_state.cancel_quick_match(from_user)
+        if not success:
+            reason_to_error = {
+                "user_offline": "Quick Match cancel failed: user offline.",
+            }
+            send_message(client_socket, make_error_message(reason_to_error.get(reason, "Quick Match cancel failed.")))
+            return
+        send_message(
+            client_socket,
+            make_invitation_message(
+                from_user="SERVER",
+                to_user=sender_username,
+                action="quick_cancelled",
+            ),
+        )
+        return
+
     if action == "spectate":
         # Spectator join:
         # - from_user must match connected sender
@@ -257,11 +337,16 @@ def _handle_invitation_message(
 
         # PBI 2.7: match starts when invite is accepted.
         if reason == "accepted" and game_id is not None:
+            match_skins = {
+                from_user: server_state.get_skin_dict_for_username(from_user),
+                to_user: server_state.get_skin_dict_for_username(to_user),
+            }
             start_message = make_invitation_message(
                 from_user=from_user,
                 to_user=to_user,
                 action="match_started",
                 game_id=game_id,
+                skins=match_skins,
             )
             for sock in [sender_socket, receiver_socket]:
                 if sock is None:
@@ -578,6 +663,9 @@ def handle_incoming_message(
                 error_message = "Username already taken."
             send_message(client_socket, make_error_message(error_message))
             return
+
+        # Cosmetic skin chosen in the lobby travels with the username payload.
+        server_state.set_client_skin(client_id, payload.get("skin"))
 
         # PBI 2.4 + 2.5: push lobby state updates after successful username set.
         broadcast_online_users(server_state)

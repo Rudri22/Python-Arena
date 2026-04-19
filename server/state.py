@@ -22,6 +22,7 @@ from server.game_engine import (
     step_runtime,
     to_protocol_state,
 )
+from shared.protocol import SnakeSkin, sanitize_skin, skin_to_dict
 
 
 def _normalize_username(username: str) -> str:
@@ -55,6 +56,7 @@ class ServerState:
     # Maps normalized username -> client_id (case-insensitive uniqueness).
     _username_to_client: dict[str, str] = field(default_factory=dict)
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
+    _client_skins: dict[str, SnakeSkin] = field(default_factory=dict)
     # Per-online-username reconnect/session version to detect leave+rejoin.
     _user_session_versions: dict[str, int] = field(default_factory=dict)
     _next_user_session_version: int = 1
@@ -62,6 +64,7 @@ class ServerState:
     # Invitation and matchmaking registry.
     _pending_invites: dict[tuple[str, str], str] = field(default_factory=dict)
     _busy_invite_users: set[str] = field(default_factory=set)
+    _quick_match_queue: list[str] = field(default_factory=list)
     _active_matches: dict[str, tuple[str, str]] = field(default_factory=dict)
     _user_to_match: dict[str, str] = field(default_factory=dict)
     _match_spectators: dict[str, set[str]] = field(default_factory=dict)
@@ -92,6 +95,7 @@ class ServerState:
             self.connected_clients = max(0, self.connected_clients - 1)
             previous_username = self._client_usernames.pop(client_id, None)
             self._client_sockets.pop(client_id, None)
+            self._client_skins.pop(client_id, None)
 
             if previous_username is not None:
                 owner_id = self._username_to_client.get(_normalize_username(previous_username))
@@ -121,6 +125,7 @@ class ServerState:
             self.connected_clients = max(0, self.connected_clients - 1)
             previous_username = self._client_usernames.pop(client_id, None)
             self._client_sockets.pop(client_id, None)
+            self._client_skins.pop(client_id, None)
 
             if previous_username is None:
                 return events
@@ -202,6 +207,22 @@ class ServerState:
         with self._lock:
             return self._client_usernames.get(client_id)
 
+    def set_client_skin(self, client_id: str, raw_skin: dict | None) -> None:
+        """Store a sanitized skin for one connected client."""
+
+        skin = sanitize_skin(raw_skin)
+        with self._lock:
+            if client_id in self._client_usernames:
+                self._client_skins[client_id] = skin
+
+    def get_skin_dict_for_username(self, username: str) -> dict[str, str]:
+        """Return the skin dict for a username, or a default skin if unset."""
+
+        with self._lock:
+            client_id = self._username_to_client.get(_normalize_username(username))
+            skin = self._client_skins.get(client_id) if client_id is not None else None
+            return skin_to_dict(skin if skin is not None else SnakeSkin())
+
     def get_online_users(self) -> list[str]:
         """Return all online usernames sorted for deterministic payloads."""
 
@@ -255,11 +276,90 @@ class ServerState:
                 return False, "cannot_invite_self"
             if from_user in self._user_to_match or to_user in self._user_to_match:
                 return False, "user_in_match"
+            # If inviter moves to direct invites, remove from quick queue.
+            self._remove_from_quick_queue_locked(from_user)
             invite_key = (from_user, to_user)
             if invite_key in self._pending_invites:
                 return False, "user_busy"
             self._pending_invites[invite_key] = "pending"
             return True, "pending"
+
+    def request_quick_match(self, username: str) -> tuple[bool, str, str | None, str | None]:
+        """
+        Queue one user for quick match, or pair immediately when possible.
+
+        Returns:
+        - (True, "waiting"|"already_waiting", None, None)
+        - (True, "matched", opponent, game_id)
+        - (False, "<reason>", None, None)
+        """
+
+        with self._lock:
+            player = self._resolve_username(username)
+            if player is None:
+                return False, "user_offline", None, None
+            if player in self._user_to_match:
+                return False, "user_in_match", None, None
+
+            # Keep queue clean from stale/unavailable entries.
+            cleaned: list[str] = []
+            for queued in self._quick_match_queue:
+                canonical = self._resolve_username(queued)
+                if canonical is None:
+                    continue
+                if canonical in self._user_to_match:
+                    continue
+                if canonical not in cleaned:
+                    cleaned.append(canonical)
+            self._quick_match_queue = cleaned
+
+            if player in self._quick_match_queue:
+                return True, "already_waiting", None, None
+
+            opponent: str | None = None
+            while self._quick_match_queue:
+                candidate = self._quick_match_queue.pop(0)
+                if candidate == player:
+                    continue
+                if self._resolve_username(candidate) is None:
+                    continue
+                if candidate in self._user_to_match:
+                    continue
+                opponent = candidate
+                break
+
+            if opponent is None:
+                self._quick_match_queue.append(player)
+                return True, "waiting", None, None
+
+            # Pair and start match immediately.
+            self._cleanup_user_invites_locked(player)
+            self._cleanup_user_invites_locked(opponent)
+            self._remove_from_quick_queue_locked(player)
+            self._remove_from_quick_queue_locked(opponent)
+
+            game_id = f"game-{uuid4().hex[:8]}"
+            self._active_matches[game_id] = (opponent, player)
+            self._user_to_match[opponent] = game_id
+            self._user_to_match[player] = game_id
+            self._match_runtimes[game_id] = create_match_runtime(
+                game_id=game_id,
+                player_a=opponent,
+                player_b=player,
+            )
+            return True, "matched", opponent, game_id
+
+    def cancel_quick_match(self, username: str) -> tuple[bool, str]:
+        """Remove one user from quick-match queue."""
+
+        with self._lock:
+            player = self._resolve_username(username)
+            if player is None:
+                return False, "user_offline"
+            if player not in self._quick_match_queue:
+                return True, "not_waiting"
+            self._remove_from_quick_queue_locked(player)
+            return True, "cancelled"
 
     def mark_match_handoff(self, username: str, ttl_seconds: float = 8.0) -> tuple[bool, str]:
         """Mark an active match for short reconnect handoff (GUI -> Pygame)."""
@@ -309,6 +409,8 @@ class ServerState:
                 # either matched player so lobby invite state stays consistent.
                 self._cleanup_user_invites_locked(from_user)
                 self._cleanup_user_invites_locked(to_user)
+                self._remove_from_quick_queue_locked(from_user)
+                self._remove_from_quick_queue_locked(to_user)
 
                 game_id = f"game-{uuid4().hex[:8]}"
                 self._active_matches[game_id] = (from_user, to_user)
@@ -525,7 +627,10 @@ class ServerState:
                 # Run authoritative simulation continuously on server tick,
                 # even when no fresh movement command arrived this frame.
                 if runtime.status == "running":
-                    step_runtime(runtime)
+                    if runtime.countdown_ticks > 0:
+                        runtime.countdown_ticks -= 1
+                    else:
+                        step_runtime(runtime)
 
                 players = self._active_matches.get(game_id)
                 if players is None:
@@ -668,6 +773,7 @@ class ServerState:
         """Internal cleanup for invitation/match state linked to a user."""
 
         self._remove_spectator_locked(username)
+        self._remove_from_quick_queue_locked(username)
         self._cleanup_user_invites_locked(username)
 
         game_id = self._user_to_match.pop(username, None)
@@ -742,6 +848,11 @@ class ServerState:
         invites_to_remove = [key for key in self._pending_invites if username in key]
         for from_user, to_user in invites_to_remove:
             self._pending_invites.pop((from_user, to_user), None)
+
+    def _remove_from_quick_queue_locked(self, username: str) -> None:
+        """Drop one username from quick-match queue while lock is held."""
+
+        self._quick_match_queue = [u for u in self._quick_match_queue if u != username]
 
     def _is_handoff_active_locked(self, game_id: str) -> bool:
         """Check if a match is currently in reconnect handoff grace window."""
