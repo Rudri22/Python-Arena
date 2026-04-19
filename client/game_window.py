@@ -20,12 +20,20 @@ import queue
 import threading
 
 from client.network import ClientConnection
+from client.snake_skins import (
+    derive_skin_colors,
+    draw_segmented_snake,
+)
 from shared.protocol import (
     MessageType,
+    SnakeSkin,
     make_chat_message,
     make_invitation_message,
     make_movement_message,
     make_username_message,
+    sanitize_skin,
+    SKIN_COLORS,
+    skin_to_dict,
 )
 
 WINDOW_WIDTH = 1220
@@ -67,13 +75,6 @@ STATE_INTERPOLATION_MS = 120
 STATIC_OBSTACLES_GAME: tuple[tuple[int, int], ...] = (
     (9, 7), (10, 7), (9, 12), (10, 12), (5, 10), (14, 10),
 )
-# Snake palette
-SNAKE_A_BODY = (50, 215, 90)
-SNAKE_A_HEAD = (20, 160, 50)
-SNAKE_A_GLOW = (30, 240, 80, 90)
-SNAKE_B_BODY = (255, 175, 35)
-SNAKE_B_HEAD = (220, 125, 15)
-SNAKE_B_GLOW = (255, 200, 60, 90)
 BERRY_COLOR  = (200, 255, 100)
 # HUD palette
 HUD_BG       = (12, 16, 24)
@@ -104,6 +105,8 @@ class PygameArenaWindow:
         spectator_mode: bool = False,
         return_to_tk_lobby: bool = True,
         keep_window_open_on_return: bool = False,
+        initial_skin: dict | None = None,
+        initial_match_skins: dict | None = None,
     ) -> None:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
@@ -119,6 +122,18 @@ class PygameArenaWindow:
         self.spectator_mode = spectator_mode
         self.return_to_tk_lobby = return_to_tk_lobby
         self.keep_window_open_on_return = keep_window_open_on_return
+        # Cosmetic skins chosen in the lobby; keyed by player username.
+        self.local_skin: SnakeSkin = sanitize_skin(initial_skin) if initial_skin else SnakeSkin()
+        self.skin_by_username: dict[str, SnakeSkin] = {}
+        if isinstance(initial_match_skins, dict):
+            for name, raw in initial_match_skins.items():
+                if isinstance(raw, dict):
+                    self.skin_by_username[str(name)] = sanitize_skin(raw)
+        # Self snake always uses the locally chosen skin (ensures identity if
+        # server's copy hasn't reached us yet when rendering starts).
+        self.skin_by_username.setdefault(username, self.local_skin)
+        self.snake_a_skin: SnakeSkin = self.skin_by_username.get(username, SnakeSkin())
+        self.snake_b_skin: SnakeSkin = SnakeSkin()
 
         self.grid_cols = GRID_COLS
         self.arena_w = self.grid_cols * TILE_SIZE
@@ -261,6 +276,7 @@ class PygameArenaWindow:
         self.has_authoritative_state = False
         self.match_status = "waiting"
         self.match_winner = "-"
+        self.countdown_ticks = 0
         self.timer_remaining = 0
         self.timer_elapsed = 0
         self.connection_healthy = True
@@ -1791,7 +1807,7 @@ class PygameArenaWindow:
         self.last_server_message = f"Connected to {self.server_ip}:{self.server_port}"
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
-        self.connection.send_message(make_username_message(self.username))
+        self.connection.send_message(make_username_message(self.username, skin_to_dict(self.local_skin)))
 
     def _disconnect_from_server(self) -> None:
         if self.connection is not None:
@@ -1859,6 +1875,20 @@ class PygameArenaWindow:
                 self.active_game_id = payload.get("game_id")
                 self.pending_invite_to = None
                 self._reset_local_round_layout()
+                skins_payload = payload.get("skins", {})
+                if isinstance(skins_payload, dict):
+                    for name, raw in skins_payload.items():
+                        if isinstance(raw, dict):
+                            self.skin_by_username[str(name)] = sanitize_skin(raw)
+                # Ensure our local skin stays authoritative for self-render
+                self.skin_by_username[self.username] = self.local_skin
+                self.snake_a_skin = self.skin_by_username.get(self.username, SnakeSkin())
+                opponent_name = next(
+                    (n for n in self.skin_by_username if n.casefold() != self.username.casefold()),
+                    None,
+                )
+                if opponent_name is not None:
+                    self.snake_b_skin = self.skin_by_username[opponent_name]
                 self.last_server_message = f"Match started ({self.active_game_id})"
                 return
             if action == "spectate_joined":
@@ -1981,6 +2011,7 @@ class PygameArenaWindow:
             if body:
                 self.snake_a = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_a_health = int(my_snake.get("health", self.snake_a_health))
+            self.snake_a_skin = self.skin_by_username.get(self.player_a_name, self.local_skin)
 
         if opp_snake is not None:
             self.player_b_name = str(opp_snake.get("player", self.player_b_name))
@@ -1988,6 +2019,7 @@ class PygameArenaWindow:
             if body:
                 self.snake_b = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_b_health = int(opp_snake.get("health", self.snake_b_health))
+            self.snake_b_skin = self.skin_by_username.get(self.player_b_name, self.snake_b_skin)
 
         pies_raw = state.get("pies", [])
         if pies_raw:
@@ -2017,6 +2049,7 @@ class PygameArenaWindow:
         self.timer_elapsed   = int(timer.get("elapsed_seconds",   self.timer_elapsed))
         self.match_status    = str(state.get("status", self.match_status))
         self.match_winner    = str(state.get("winner") or self.match_winner)
+        self.countdown_ticks = int(state.get("countdown", 0))
         self._start_state_interpolation(old_a, old_b)
 
     def _start_state_interpolation(self, old_a: list, old_b: list) -> None:
@@ -2224,59 +2257,20 @@ class PygameArenaWindow:
     def _draw_game_snakes(self) -> None:
         if self.has_authoritative_state:
             self._update_interpolated_snakes()
-            self._draw_single_game_snake(self.render_snake_a, SNAKE_A_BODY, SNAKE_A_HEAD, SNAKE_A_GLOW)
-            self._draw_single_game_snake(self.render_snake_b, SNAKE_B_BODY, SNAKE_B_HEAD, SNAKE_B_GLOW)
+            self._draw_single_game_snake(self.render_snake_a, self.snake_a_skin)
+            self._draw_single_game_snake(self.render_snake_b, self.snake_b_skin)
         else:
             fa = [(float(x), float(y)) for x, y in self.snake_a]
             fb = [(float(x), float(y)) for x, y in self.snake_b]
-            self._draw_single_game_snake(fa, SNAKE_A_BODY, SNAKE_A_HEAD, SNAKE_A_GLOW)
-            self._draw_single_game_snake(fb, SNAKE_B_BODY, SNAKE_B_HEAD, SNAKE_B_GLOW)
+            self._draw_single_game_snake(fa, self.snake_a_skin)
+            self._draw_single_game_snake(fb, self.snake_b_skin)
 
-    def _draw_single_game_snake(
-        self,
-        cells: list,
-        body_clr: tuple,
-        head_clr: tuple,
-        glow_clr: tuple,
-    ) -> None:
+    def _draw_single_game_snake(self, cells: list, skin: SnakeSkin) -> None:
         if not cells:
             return
-        r = max(5, int(GAME_CELL_H * 0.5) - 1)   # fits inside 23.4 px cell height
+        r = max(5, int(GAME_CELL_H * 0.5) - 1)
         centers = [self._game_to_pixel(x, y) for x, y in cells]
-
-        # Connecting tube drawn first so circles sit on top
-        for i in range(len(centers) - 1):
-            ax, ay = int(centers[i][0]),   int(centers[i][1])
-            bx, by = int(centers[i+1][0]), int(centers[i+1][1])
-            pygame.draw.line(self.screen, body_clr, (ax, ay), (bx, by), r * 2 - 2)
-
-        # Draw body circles tail→head
-        for i in range(len(centers) - 1, -1, -1):
-            cx, cy = int(centers[i][0]), int(centers[i][1])
-            if i == 0:
-                # Glow halo
-                gs = pygame.Surface((r * 4 + 6, r * 4 + 6), pygame.SRCALPHA)
-                pygame.draw.circle(gs, glow_clr, (r * 2 + 3, r * 2 + 3), r + 6)
-                self.screen.blit(gs, (cx - r * 2 - 3, cy - r * 2 - 3))
-                # Head
-                pygame.draw.circle(self.screen, head_clr, (cx, cy), r + 2)
-                pygame.draw.circle(self.screen, body_clr, (cx, cy), r)
-                # Eyes
-                if len(centers) > 1:
-                    ddx = centers[0][0] - centers[1][0]
-                    ddy = centers[0][1] - centers[1][1]
-                    dn  = max(0.01, (ddx * ddx + ddy * ddy) ** 0.5)
-                    ddx /= dn;  ddy /= dn
-                    px, py = -ddy, ddx
-                    for sign in (-1, 1):
-                        ex = int(cx + px * sign * (r * 0.5) + ddx * r * 0.35)
-                        ey = int(cy + py * sign * (r * 0.5) + ddy * r * 0.35)
-                        pygame.draw.circle(self.screen, (255, 255, 255), (ex, ey), max(2, r // 4))
-                        pygame.draw.circle(self.screen, (0, 0, 0),       (ex, ey), max(1, r // 7))
-            else:
-                taper = 0.55 + 0.45 * (i / len(centers))
-                cr    = max(3, int(r * taper))
-                pygame.draw.circle(self.screen, body_clr, (cx, cy), cr)
+        draw_segmented_snake(self.screen, centers, skin, r)
 
     def _draw_game_pies(self) -> None:
         ticks = pygame.time.get_ticks()
@@ -2294,6 +2288,56 @@ class PygameArenaWindow:
             pygame.draw.circle(self.screen, BERRY_COLOR,    (cx, cy), r)
             pygame.draw.circle(self.screen, (240, 255, 200), (cx - r // 3, cy - r // 3), max(2, r // 3))
 
+    def _draw_countdown_overlay(self) -> None:
+        """Render a centred 3-2-1 / GO! overlay while the game is frozen."""
+        if self.countdown_ticks <= 0:
+            return
+
+        # 25 ticks total → each digit shown for ~8 ticks; last 1 tick shows GO!
+        TOTAL = 25
+        remaining = self.countdown_ticks
+        if remaining > 17:
+            label = "3"
+            clr = (255, 90, 60)
+        elif remaining > 9:
+            label = "2"
+            clr = (255, 200, 40)
+        elif remaining > 1:
+            label = "1"
+            clr = (80, 240, 120)
+        else:
+            label = "GO!"
+            clr = (255, 255, 255)
+
+        # Pulsing scale: 0→1 within each digit's window
+        pulse = 1.0 + 0.25 * math.sin(pygame.time.get_ticks() / 120.0)
+        font_size = int(140 * pulse)
+        try:
+            font = pygame.font.SysFont("Arial Black", font_size, bold=True)
+        except Exception:
+            font = pygame.font.Font(None, font_size)
+
+        cx, cy = WINDOW_WIDTH // 2, WINDOW_HEIGHT // 2
+
+        # Dark vignette backdrop
+        overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 90))
+        self.screen.blit(overlay, (0, 0))
+
+        # Shadow
+        shadow = font.render(label, True, (0, 0, 0))
+        sr = shadow.get_rect(center=(cx + 4, cy + 4))
+        self.screen.blit(shadow, sr)
+
+        # Main digit
+        surf = font.render(label, True, clr)
+        r = surf.get_rect(center=(cx, cy))
+        self.screen.blit(surf, r)
+
+        # "GET READY" subtitle
+        sub = self.font_hud_sm.render("GET READY!", True, (220, 220, 220))
+        self.screen.blit(sub, sub.get_rect(center=(cx, cy + int(font_size * 0.62))))
+
     def _draw_hud(self) -> None:
         """Minimal HUD: slim top bar + optional chat overlay."""
 
@@ -2309,7 +2353,8 @@ class PygameArenaWindow:
 
         # ── Player A — left side ─────────────────────────────────────
         a_frac = max(0.0, min(1.0, self.snake_a_health / LOCAL_INITIAL_HEALTH))
-        a_clr  = SNAKE_A_BODY if a_frac > 0.3 else HUD_DANGER
+        a_skin_clr = SKIN_COLORS.get(self.snake_a_skin.color, SKIN_COLORS["venom"])
+        a_clr  = a_skin_clr if a_frac > 0.3 else HUD_DANGER
         pygame.draw.circle(self.screen, a_clr, (MARGIN, mid_y), 5)
         n_a = self.font_hud_sm.render(self.player_a_name[:14], True, HUD_TEXT)
         self.screen.blit(n_a, (MARGIN + 10, mid_y - n_a.get_height() // 2))
@@ -2323,7 +2368,8 @@ class PygameArenaWindow:
 
         # ── Player B — right side ────────────────────────────────────
         b_frac = max(0.0, min(1.0, self.snake_b_health / LOCAL_INITIAL_HEALTH))
-        b_clr  = SNAKE_B_BODY if b_frac > 0.3 else HUD_DANGER
+        b_skin_clr = SKIN_COLORS.get(self.snake_b_skin.color, SKIN_COLORS["ember"])
+        b_clr  = b_skin_clr if b_frac > 0.3 else HUD_DANGER
         pygame.draw.circle(self.screen, b_clr, (WINDOW_WIDTH - MARGIN, mid_y), 5)
         n_b = self.font_hud_sm.render(self.player_b_name[:14], True, HUD_TEXT)
         self.screen.blit(n_b, (WINDOW_WIDTH - MARGIN - 10 - n_b.get_width(), mid_y - n_b.get_height() // 2))
@@ -2488,6 +2534,7 @@ class PygameArenaWindow:
 
         # ── HUD + overlays ─────────────────────────────────────────────
         self._draw_hud()
+        self._draw_countdown_overlay()
         if self.show_result_screen:
             self._draw_result_screen()
 
@@ -2500,6 +2547,8 @@ def main(
     spectator_mode: bool = False,
     return_to_tk_lobby: bool = True,
     keep_window_open_on_return: bool = False,
+    initial_skin: dict | None = None,
+    initial_match_skins: dict | None = None,
 ) -> bool:
     """Entrypoint kept compatible with existing callers."""
 
@@ -2511,6 +2560,8 @@ def main(
         spectator_mode=spectator_mode,
         return_to_tk_lobby=return_to_tk_lobby,
         keep_window_open_on_return=keep_window_open_on_return,
+        initial_skin=initial_skin,
+        initial_match_skins=initial_match_skins,
     )
     return app.run()
 

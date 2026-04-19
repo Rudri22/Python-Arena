@@ -22,6 +22,7 @@ from server.game_engine import (
     step_runtime,
     to_protocol_state,
 )
+from shared.protocol import SnakeSkin, sanitize_skin, skin_to_dict
 
 
 def _normalize_username(username: str) -> str:
@@ -55,6 +56,7 @@ class ServerState:
     # Maps normalized username -> client_id (case-insensitive uniqueness).
     _username_to_client: dict[str, str] = field(default_factory=dict)
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
+    _client_skins: dict[str, SnakeSkin] = field(default_factory=dict)
     # Per-online-username reconnect/session version to detect leave+rejoin.
     _user_session_versions: dict[str, int] = field(default_factory=dict)
     _next_user_session_version: int = 1
@@ -93,6 +95,7 @@ class ServerState:
             self.connected_clients = max(0, self.connected_clients - 1)
             previous_username = self._client_usernames.pop(client_id, None)
             self._client_sockets.pop(client_id, None)
+            self._client_skins.pop(client_id, None)
 
             if previous_username is not None:
                 owner_id = self._username_to_client.get(_normalize_username(previous_username))
@@ -122,6 +125,7 @@ class ServerState:
             self.connected_clients = max(0, self.connected_clients - 1)
             previous_username = self._client_usernames.pop(client_id, None)
             self._client_sockets.pop(client_id, None)
+            self._client_skins.pop(client_id, None)
 
             if previous_username is None:
                 return events
@@ -202,6 +206,22 @@ class ServerState:
 
         with self._lock:
             return self._client_usernames.get(client_id)
+
+    def set_client_skin(self, client_id: str, raw_skin: dict | None) -> None:
+        """Store a sanitized skin for one connected client."""
+
+        skin = sanitize_skin(raw_skin)
+        with self._lock:
+            if client_id in self._client_usernames:
+                self._client_skins[client_id] = skin
+
+    def get_skin_dict_for_username(self, username: str) -> dict[str, str]:
+        """Return the skin dict for a username, or a default skin if unset."""
+
+        with self._lock:
+            client_id = self._username_to_client.get(_normalize_username(username))
+            skin = self._client_skins.get(client_id) if client_id is not None else None
+            return skin_to_dict(skin if skin is not None else SnakeSkin())
 
     def get_online_users(self) -> list[str]:
         """Return all online usernames sorted for deterministic payloads."""
@@ -607,7 +627,10 @@ class ServerState:
                 # Run authoritative simulation continuously on server tick,
                 # even when no fresh movement command arrived this frame.
                 if runtime.status == "running":
-                    step_runtime(runtime)
+                    if runtime.countdown_ticks > 0:
+                        runtime.countdown_ticks -= 1
+                    else:
+                        step_runtime(runtime)
 
                 players = self._active_matches.get(game_id)
                 if players is None:

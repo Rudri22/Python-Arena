@@ -7,7 +7,7 @@ import threading
 import tempfile
 import wave
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -15,7 +15,27 @@ from uuid import uuid4
 import pygame
 
 from client.network import ClientConnection
-from shared.protocol import MessageType, make_chat_message, make_invitation_message, make_username_message
+from client.snake_skins import (
+    draw_segmented_snake,
+    draw_snake_eyes,
+    draw_snake_hat,
+    draw_snake_pattern,
+    draw_snake_tail,
+)
+from shared.protocol import (
+    EYE_STYLES,
+    HATS,
+    MessageType,
+    PATTERNS,
+    SKIN_COLORS,
+    SnakeSkin,
+    TAILS,
+    make_chat_message,
+    make_invitation_message,
+    make_username_message,
+    sanitize_skin,
+    skin_to_dict,
+)
 
 """
 Python-Arena Prelobby + Lobby (single-file feature map)
@@ -1397,15 +1417,13 @@ class PygameLobbyScene:
         self.rank2_icon = self._load_asset_icon("rank2.png")
         self.rank3_icon = self._load_asset_icon("rank3.png")
         self.change_skin_icon = self._load_asset_icon("change_skin_snake.png")
-        self.skin_menu_options: list[tuple[str, tuple[int, int, int]]] = [
-            ("Venom", (76, 246, 132)),
-            ("Inferno", (244, 78, 62)),
-            ("Phantom", (154, 96, 246)),
-            ("Glacier", (98, 198, 255)),
-            ("Solar", (246, 206, 72)),
-            ("Wraith", (210, 226, 242)),
-        ]
-        self.skin_menu_idx = 0
+        # Quick-cycle palette keys for the prev/next dots on the left panel.
+        self.skin_color_keys: list[str] = list(SKIN_COLORS.keys())
+        self.current_skin: SnakeSkin = SnakeSkin()
+        self.pending_skin: SnakeSkin = SnakeSkin()
+        self.skin_modal_open: bool = False
+        self.skin_modal_tab: str = "color"
+        self.match_skins: dict[str, dict[str, str]] = {}
 
         self.connection: ClientConnection | None = None
         self.receiver_thread: threading.Thread | None = None
@@ -1468,78 +1486,6 @@ class PygameLobbyScene:
             return pygame.image.load(str(icon_path)).convert_alpha()
         except pygame.error:
             return None
-
-    def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
-        """Draw a snake + clothing badge icon for skin selection."""
-        cx, cy = center
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (cx - 21, cy - 21))
-            surf.blit(icon, icon.get_rect(center=(cx, cy - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(cx - 13, cy - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (cx + 8, cy - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (cx + 9, cy - 3), 1)
-
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (cx + 10, cy + 8))
-
-    def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
-        """Draw a snake + clothing badge icon for skin selection."""
-        cx, cy = center
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (cx - 21, cy - 21))
-            surf.blit(icon, icon.get_rect(center=(cx, cy - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(cx - 13, cy - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (cx + 8, cy - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (cx + 9, cy - 3), 1)
-
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (cx + 10, cy + 8))
-
-    def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
-        """Draw a snake + clothing badge icon for skin selection."""
-        cx, cy = center
-        if self.skin_icon is not None:
-            icon = pygame.transform.smoothscale(self.skin_icon, (44, 44))
-            shadow = icon.copy()
-            shadow.fill((0, 0, 0, 85), special_flags=pygame.BLEND_RGBA_MULT)
-            surf.blit(shadow, (cx - 21, cy - 21))
-            surf.blit(icon, icon.get_rect(center=(cx, cy - 1)))
-        else:
-            pygame.draw.arc(surf, (42, 182, 98), pygame.Rect(cx - 13, cy - 12, 22, 22), 0.2, 5.7, 4)
-            pygame.draw.circle(surf, (42, 182, 98), (cx + 8, cy - 2), 5)
-            pygame.draw.circle(surf, (16, 26, 20), (cx + 9, cy - 3), 1)
-
-        badge = pygame.Surface((22, 22), pygame.SRCALPHA)
-        pygame.draw.circle(badge, (18, 44, 66, 235), (11, 11), 10)
-        pygame.draw.circle(badge, (108, 214, 168, 220), (11, 11), 10, 2)
-        pygame.draw.arc(badge, (240, 246, 255), pygame.Rect(6, 4, 10, 8), 3.2, 6.0, 1)
-        pygame.draw.line(badge, (240, 246, 255), (11, 8), (11, 10), 1)
-        pygame.draw.line(badge, (240, 246, 255), (7, 12), (15, 12), 1)
-        shirt_pts = [(8, 12), (6, 14), (7, 16), (9, 15), (9, 18), (13, 18), (13, 15), (15, 16), (16, 14), (14, 12)]
-        pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
-        surf.blit(badge, (cx + 10, cy + 8))
 
     def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
         """Draw a snake + clothing badge icon for skin selection."""
@@ -1668,7 +1614,7 @@ class PygameLobbyScene:
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
         try:
-            self.connection.send_message(make_username_message(self.username))
+            self.connection.send_message(make_username_message(self.username, skin_to_dict(self.current_skin)))
             self._append_log(f"[SYSTEM] Username submitted: {self.username}")
         except OSError as error:
             self._append_log(f"[ERROR] Username submit failed: {error}")
@@ -1683,7 +1629,7 @@ class PygameLobbyScene:
             return
         self._next_username_retry_ms = 0
         try:
-            self.connection.send_message(make_username_message(self.username))
+            self.connection.send_message(make_username_message(self.username, skin_to_dict(self.current_skin)))
             self._append_log(f"[SYSTEM] Retrying username: {self.username}")
         except OSError as error:
             self._append_log(f"[ERROR] Username retry failed: {error}")
@@ -1712,6 +1658,19 @@ class PygameLobbyScene:
 
     def _disconnect(self) -> None:
         if self.connection is not None:
+            if self.start_game:
+                # Tell the server to keep the match alive during the
+                # lobby → game_window reconnect window (8-second grace period).
+                try:
+                    self.connection.send_message(
+                        make_invitation_message(
+                            from_user=self.username,
+                            to_user=self.username,
+                            action="handoff",
+                        )
+                    )
+                except OSError:
+                    pass
             try:
                 self.connection.close()
             except OSError:
@@ -1824,6 +1783,9 @@ class PygameLobbyScene:
                 self._next_quick_match_ping_ms = 0
                 game_id = payload.get("game_id", "unknown")
                 self._append_log(f"[MATCH] Started game_id={game_id}")
+                skins_payload = payload.get("skins")
+                if isinstance(skins_payload, dict):
+                    self.match_skins = {str(k): dict(v) for k, v in skins_payload.items() if isinstance(v, dict)}
                 opponent = self._extract_opponent_from_match(payload)
                 if opponent:
                     self._remove_outgoing_pending(opponent)
@@ -2164,9 +2126,9 @@ class PygameLobbyScene:
 
     def _skin_dot_rect(self, idx: int) -> pygame.Rect:
         left = self._left_panel_rect()
-        total = len(self.skin_menu_options)
-        spacing = 20
-        r = 7
+        total = len(self.skin_color_keys)
+        spacing = 10
+        r = 5
         total_w = total * (r * 2) + (total - 1) * spacing
         start_x = left.centerx - total_w // 2
         cx = start_x + idx * ((r * 2) + spacing) + r
@@ -2392,7 +2354,215 @@ class PygameLobbyScene:
         chat = self._chat_rect()
         return pygame.Rect(chat.right + 164, chat.y, 120, chat.height)
 
+    # ------------------------------------------------------------------
+    # Skin customization: state helpers, modal geometry, handlers, draw.
+    # ------------------------------------------------------------------
+
+    def _send_skin_update(self) -> None:
+        """Resend USERNAME with the current skin so the server updates its copy."""
+
+        if self.connection is None:
+            return
+        try:
+            self.connection.send_message(
+                make_username_message(self.username, skin_to_dict(self.current_skin))
+            )
+        except OSError as error:
+            self._append_log(f"[ERROR] Skin update failed: {error}")
+
+    def _set_skin_color(self, color_key: str) -> None:
+        if color_key not in SKIN_COLORS:
+            return
+        self.current_skin = dataclass_replace(self.current_skin, color=color_key)
+        self._send_skin_update()
+
+    def _cycle_skin_color(self, step: int) -> None:
+        keys = self.skin_color_keys
+        try:
+            idx = keys.index(self.current_skin.color)
+        except ValueError:
+            idx = 0
+        self._set_skin_color(keys[(idx + step) % len(keys)])
+
+    def _open_skin_modal(self) -> None:
+        self.pending_skin = dataclass_replace(self.current_skin)
+        self.skin_modal_tab = "color"
+        self.skin_modal_open = True
+
+    def _close_skin_modal(self, commit: bool) -> None:
+        if commit:
+            self.current_skin = dataclass_replace(self.pending_skin)
+            self._send_skin_update()
+        self.skin_modal_open = False
+
+    def _skin_modal_rect(self) -> pygame.Rect:
+        w, h = 620, 460
+        return pygame.Rect((self.w - w) // 2, (self.h - h) // 2, w, h)
+
+    def _skin_modal_tab_rect(self, idx: int) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        tab_w = (modal.width - 40) // 5
+        x = modal.x + 20 + idx * tab_w
+        return pygame.Rect(x, modal.y + 52, tab_w - 6, 30)
+
+    def _skin_modal_tabs(self) -> list[str]:
+        return ["color", "pattern", "hat", "tail", "eyes"]
+
+    def _skin_modal_active_options(self) -> list[str]:
+        tab = self.skin_modal_tab
+        if tab == "color":
+            return list(SKIN_COLORS.keys())
+        if tab == "pattern":
+            return list(PATTERNS)
+        if tab == "hat":
+            return list(HATS)
+        if tab == "tail":
+            return list(TAILS)
+        if tab == "eyes":
+            return list(EYE_STYLES)
+        return []
+
+    def _skin_modal_option_rect(self, idx: int) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        grid_x = modal.x + 20
+        grid_y = modal.y + 96
+        grid_w = modal.width * 60 // 100 - 20
+        grid_h = modal.height - 96 - 60
+        cols = 3 if self.skin_modal_tab == "color" else 2
+        rows_needed = 4 if self.skin_modal_tab == "color" else 3
+        cell_w = grid_w // cols
+        cell_h = min(74, grid_h // rows_needed)
+        col = idx % cols
+        row = idx // cols
+        return pygame.Rect(grid_x + col * cell_w, grid_y + row * cell_h, cell_w - 8, cell_h - 8)
+
+    def _skin_modal_preview_rect(self) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        x = modal.x + modal.width * 60 // 100 + 8
+        return pygame.Rect(x, modal.y + 96, modal.right - x - 20, modal.height - 96 - 60)
+
+    def _skin_modal_reset_rect(self) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        return pygame.Rect(modal.x + 20, modal.bottom - 46, 110, 30)
+
+    def _skin_modal_close_rect(self) -> pygame.Rect:
+        modal = self._skin_modal_rect()
+        return pygame.Rect(modal.right - 130, modal.bottom - 46, 110, 30)
+
+    def _handle_skin_modal_click(self, pos: tuple[int, int]) -> None:
+        modal = self._skin_modal_rect()
+        if not modal.collidepoint(pos):
+            self._close_skin_modal(commit=True)
+            return
+        for i, tab in enumerate(self._skin_modal_tabs()):
+            if self._skin_modal_tab_rect(i).collidepoint(pos):
+                self.skin_modal_tab = tab
+                return
+        for idx, key in enumerate(self._skin_modal_active_options()):
+            if self._skin_modal_option_rect(idx).collidepoint(pos):
+                field = self.skin_modal_tab
+                field_key = "eyes" if field == "eyes" else field
+                self.pending_skin = dataclass_replace(self.pending_skin, **{field_key: key})
+                return
+        if self._skin_modal_reset_rect().collidepoint(pos):
+            self.pending_skin = SnakeSkin()
+            return
+        if self._skin_modal_close_rect().collidepoint(pos):
+            self._close_skin_modal(commit=True)
+            return
+
+    # Skin preview: draws a small S-curve snake with the skin applied.
+    def _draw_skin_preview(self, surf: pygame.Surface, rect: pygame.Rect, skin: SnakeSkin) -> None:
+        pygame.draw.rect(surf, (12, 20, 32), rect, border_radius=10)
+        pygame.draw.rect(surf, (60, 200, 148), rect, 2, border_radius=10)
+
+        # Build a natural S-curve of segments sized to fill the preview rect
+        r = max(8, min(14, rect.height // 8))
+        n = 9
+        spread = rect.width - r * 4
+        step = spread // max(1, n - 1)
+        amp = min(int(rect.height * 0.28), 36)
+        cx0 = rect.x + r * 2
+        cy0 = rect.centery + 8
+        centers: list[tuple[float, float]] = [
+            (cx0 + i * step, cy0 + amp * math.sin(i * 1.0))
+            for i in range(n)
+        ]
+        draw_segmented_snake(surf, centers, skin, r)
+
+        label = self.font_tiny.render("PREVIEW", True, (148, 198, 228))
+        surf.blit(label, (rect.x + 10, rect.y + 8))
+
+    def _draw_skin_modal(self, surf: pygame.Surface) -> None:
+        overlay = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        surf.blit(overlay, (0, 0))
+
+        modal = self._skin_modal_rect()
+        pygame.draw.rect(surf, (14, 24, 36, 245), modal, border_radius=18)
+        pygame.draw.rect(surf, (72, 214, 152), modal, 2, border_radius=18)
+
+        title = self.font_snake_panel.render("CUSTOMIZE SNAKE", True, (96, 248, 178))
+        surf.blit(title, (modal.centerx - title.get_width() // 2, modal.y + 10))
+
+        for i, tab in enumerate(self._skin_modal_tabs()):
+            rect = self._skin_modal_tab_rect(i)
+            active = tab == self.skin_modal_tab
+            pygame.draw.rect(surf, (30, 60, 86) if active else (18, 30, 44), rect, border_radius=8)
+            pygame.draw.rect(surf, (96, 214, 178) if active else (60, 110, 140), rect, 1, border_radius=8)
+            label = self.font_tiny.render(tab.upper(), True, (220, 240, 248) if active else (150, 180, 200))
+            surf.blit(label, label.get_rect(center=rect.center))
+
+        options = self._skin_modal_active_options()
+        current_value = getattr(self.pending_skin, self.skin_modal_tab)
+        for idx, key in enumerate(options):
+            rect = self._skin_modal_option_rect(idx)
+            selected = key == current_value
+            pygame.draw.rect(surf, (24, 38, 56) if not selected else (36, 66, 92), rect, border_radius=8)
+            pygame.draw.rect(surf, (100, 226, 186) if selected else (58, 96, 126), rect, 2, border_radius=8)
+            self._draw_skin_option_thumb(surf, rect, key)
+            name = self.font_tiny.render(key.upper(), True, (224, 240, 248))
+            surf.blit(name, (rect.x + 8, rect.bottom - 18))
+
+        preview_rect = self._skin_modal_preview_rect()
+        self._draw_skin_preview(surf, preview_rect, self.pending_skin)
+
+        reset = self._skin_modal_reset_rect()
+        close = self._skin_modal_close_rect()
+        self._draw_button(reset, "RESET", accent=(236, 132, 132))
+        self._draw_button(close, "APPLY", accent=(96, 216, 168), glow=True)
+
+    def _draw_skin_option_thumb(self, surf: pygame.Surface, rect: pygame.Rect, key: str) -> None:
+        tab = self.skin_modal_tab
+        cx, cy = rect.centerx, rect.y + rect.height // 2 - 6
+        if tab == "color":
+            rgb = SKIN_COLORS[key]
+            pygame.draw.circle(surf, rgb, (cx, cy), 18)
+            pygame.draw.circle(surf, (18, 22, 30), (cx, cy), 18, 1)
+        elif tab == "pattern":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx, cy), 18)
+            if key != "solid":
+                draw_snake_pattern(surf, cx, cy, 18, 1, key, body_clr)
+        elif tab == "hat":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx, cy + 4), 14)
+            if key != "none":
+                draw_snake_hat(surf, cx, cy + 4, 14, key)
+        elif tab == "tail":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx - 6, cy), 12)
+            if key != "none":
+                draw_snake_tail(surf, cx + 8, cy, 1.0, 0.0, key)
+        elif tab == "eyes":
+            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
+            pygame.draw.circle(surf, body_clr, (cx, cy), 18)
+            draw_snake_eyes(surf, cx, cy, 16, 1.0, 0.0, key, body_clr)
+
     def _handle_mouse(self, pos: tuple[int, int]) -> None:
+        if self.skin_modal_open:
+            self._handle_skin_modal_click(pos)
+            return
         if self.player_popup_target is not None:
             if self._player_popup_invite_rect().collidepoint(pos):
                 if not self._has_outgoing_pending() and not self.quick_match_waiting:
@@ -2431,9 +2601,19 @@ class PygameLobbyScene:
             self._next_quick_match_ping_ms = 0
             return
 
-        if self._skin_change_action_rect().collidepoint(pos):
-            self.skin_menu_idx = (self.skin_menu_idx + 1) % len(self.skin_menu_options)
+        if self._skin_change_button_rect().collidepoint(pos) or self._skin_change_action_rect().collidepoint(pos):
+            self._open_skin_modal()
             return
+        if self._skin_prev_rect().collidepoint(pos):
+            self._cycle_skin_color(-1)
+            return
+        if self._skin_next_rect().collidepoint(pos):
+            self._cycle_skin_color(1)
+            return
+        for idx, _key in enumerate(self.skin_color_keys):
+            if self._skin_dot_rect(idx).collidepoint(pos):
+                self._set_skin_color(self.skin_color_keys[idx])
+                return
 
         if self._chat_max_scroll() > 0:
             up, down, _ = self._chat_scrollbar_parts()
@@ -2627,8 +2807,11 @@ class PygameLobbyScene:
                     self.chat_target_scroll = min(max(0, self.chat_target_scroll - event.y), max_scroll)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    self.return_to_prelobby = True
-                    self.running = False
+                    if self.skin_modal_open:
+                        self._close_skin_modal(commit=False)
+                    else:
+                        self.return_to_prelobby = True
+                        self.running = False
                 elif self.invite_name_focus:
                     if event.key == pygame.K_RETURN:
                         if self._typed_invite_target_valid() and not self._has_outgoing_pending():
@@ -2771,8 +2954,15 @@ class PygameLobbyScene:
         frame.blit(ys_glow, (ys_x + 1, left_panel.y + 14))
         frame.blit(ys, (ys_x, left_panel.y + 12))
 
-        holo_rgb = (192, 234, 255)
-        holo_rgb_hi = (236, 248, 255)
+        # Hologram tint: 75% skin color (brightened) + 25% cyan base
+        _skin_clr = SKIN_COLORS.get(self.current_skin.color, SKIN_COLORS["venom"])
+        _skin_bright = tuple(min(255, c + 80) for c in _skin_clr)
+        holo_rgb = (
+            int(_skin_bright[0] * 0.75 + 80  * 0.25),
+            int(_skin_bright[1] * 0.75 + 190 * 0.25),
+            int(_skin_bright[2] * 0.75 + 255 * 0.25),
+        )
+        holo_rgb_hi = tuple(min(255, c + 55) for c in holo_rgb)
         holo_cx, holo_cy = left_panel.centerx, left_panel.y + 162
         # projector platform + hologram beam (volumetric cone, no flat spot)
         platform = pygame.Rect(holo_cx - 68, holo_cy + 42, 136, 24)
@@ -2855,9 +3045,9 @@ class PygameLobbyScene:
             icon_size = int(med_r * 1.72)
             base_icon = pygame.transform.smoothscale(self.change_skin_icon, (icon_size, icon_size))
             icon = base_icon.copy()
-            # tint to hologram palette
-            icon.fill((138, 238, 255, 255), special_flags=pygame.BLEND_RGBA_MULT)
-            icon.fill((20, 72, 116, 0), special_flags=pygame.BLEND_RGBA_ADD)
+            # tint to skin-derived hologram palette
+            icon.fill((holo_rgb[0], holo_rgb[1], holo_rgb[2], 255), special_flags=pygame.BLEND_RGBA_MULT)
+            icon.fill((16, 48, 80, 0), special_flags=pygame.BLEND_RGBA_ADD)
             # soft glow silhouette behind icon
             glow_icon = pygame.transform.smoothscale(icon, (icon_size + 8, icon_size + 8))
             glow_icon.fill((86, 214, 248, 84), special_flags=pygame.BLEND_RGBA_MULT)
@@ -3415,9 +3605,11 @@ class PygameLobbyScene:
             )
             self._draw_button(self._player_popup_chat_rect(), "Chat", accent=(92, 186, 246))
             self._draw_button(self._player_popup_close_rect(), "Close", accent=(236, 132, 132))
+        if self.skin_modal_open:
+            self._draw_skin_modal(self.screen)
         pygame.display.flip()
 
-    def run(self) -> tuple[bool, bool, bool, str | None]:
+    def run(self) -> tuple[bool, bool, bool, str | None, dict[str, dict[str, str]]]:
         while self.running:
             self._events()
             self._drain_queue()
@@ -3427,7 +3619,13 @@ class PygameLobbyScene:
             self._draw()
             self.clock.tick(FPS)
         self._disconnect()
-        return self.return_to_prelobby, self.quit_app, self.start_game, self.start_game_opponent
+        return (
+            self.return_to_prelobby,
+            self.quit_app,
+            self.start_game,
+            self.start_game_opponent,
+            self.match_skins,
+        )
 
 
 def run_prelobby_to_lobby(
@@ -3473,7 +3671,7 @@ def run_prelobby_to_lobby(
             server_ip=server_ip,
             server_port=server_port,
         )
-        back_to_prelobby, quit_app, start_game, opponent = lobby.run()
+        back_to_prelobby, quit_app, start_game, opponent, match_skins = lobby.run()
         if quit_app:
             pygame.quit()
             return
@@ -3488,6 +3686,8 @@ def run_prelobby_to_lobby(
                 preferred_opponent=opponent,
                 return_to_tk_lobby=False,
                 keep_window_open_on_return=True,
+                initial_skin=skin_to_dict(lobby.current_skin),
+                initial_match_skins=match_skins,
             )
             if requested_lobby_return:
                 resume_lobby_username = username

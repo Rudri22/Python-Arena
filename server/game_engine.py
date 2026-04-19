@@ -111,6 +111,7 @@ class MatchRuntime:
     height: int = BOARD_HEIGHT
     pie_counter: int = 1
     lockstep_moves: dict[str, bool] = field(default_factory=dict)
+    countdown_ticks: int = 25  # ~3 s at 0.12 s/tick; frozen until this reaches 0
 
 
 def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRuntime:
@@ -345,6 +346,7 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
     # Sprint 5 compatibility helper:
     # Provide numeric state for clients that expect 1=running, 0=not-running.
     state_dict["status_code"] = 1 if runtime.status == "running" else 0
+    state_dict["countdown"] = runtime.countdown_ticks
     return state_dict
 
 
