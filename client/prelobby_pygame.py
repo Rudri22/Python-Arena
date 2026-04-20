@@ -45,6 +45,7 @@ from client.controls_config import (
 )
 
 _SKIN_PREFS_PATH = Path(__file__).resolve().parent / "assets" / "skin_prefs.json"
+_SOUNDS_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
 
 
 def _load_skin_prefs() -> SnakeSkin:
@@ -145,8 +146,12 @@ class MusicController:
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
-            self.wave_path = self._make_loop()
-            pygame.mixer.music.load(str(self.wave_path))
+            lobby_file = _SOUNDS_DIR / "preolobby-lobby.mpeg"
+            if lobby_file.exists():
+                pygame.mixer.music.load(str(lobby_file))
+            else:
+                self.wave_path = self._make_loop()
+                pygame.mixer.music.load(str(self.wave_path))
             self.chomp_path = self._make_numm()
             self.chomp_sound = pygame.mixer.Sound(str(self.chomp_path))
             self.chomp_sound.set_volume(0.45)
@@ -1567,6 +1572,19 @@ class PygameLobbyScene:
         self.controls_listen_tile = self._load_input_prompt_asset("Tiles (White)/tile_0066.png")
 
         self._connect()
+
+        # Keep lobby music running; start it here when entering lobby directly
+        # (e.g. returning from a game), since prelobby won't have started it.
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            if not pygame.mixer.music.get_busy():
+                lobby_file = _SOUNDS_DIR / "preolobby-lobby.mpeg"
+                if lobby_file.exists():
+                    pygame.mixer.music.load(str(lobby_file))
+                    pygame.mixer.music.play(-1)
+        except Exception:
+            pass
 
     def _load_asset_icon(self, filename: str) -> pygame.Surface | None:
         icon_path = Path(__file__).resolve().parent / "assets" / filename

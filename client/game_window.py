@@ -56,6 +56,7 @@ SIDE_EXTENSION_TILES = 5
 ARENA_TOP = 255
 ARENA_DIR = Path(__file__).resolve().parents[1] / "assets" / "arena"
 TERRAIN_DIR = Path(__file__).resolve().parents[1] / "assets" / "terrain"
+SOUNDS_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
 
 # ── Gameplay grid (mirrors server/game_engine.py) ──────────────────────────
 GAME_BOARD_COLS = 20
@@ -302,6 +303,7 @@ class PygameArenaWindow:
         self.match_status = "waiting"
         self.match_winner = "-"
         self.countdown_ticks = 0
+        self._game_sound_started = False
         self.timer_total = 300
         self.timer_remaining = 0
         self.timer_elapsed = 0
@@ -558,6 +560,8 @@ class PygameArenaWindow:
     def _draw_dj_serpent_idle(self, ticks: int, state: str, throw_progress: float) -> bool:
         """Render the original arena serpent as a DJ behind the deck art."""
 
+        DEBUG_DJ = False  # Set True to draw red dots at tail_anchor, head_anchor, and all body segments
+
         if self._dj_set_surface is None:
             return False
 
@@ -612,7 +616,7 @@ class PygameArenaWindow:
             p3: pygame.Vector2,
             count: int,
             amp: float,
-            tail_delay_s: float = 0.25,
+            tail_delay_s: float = 0.30,
         ) -> list[tuple[float, float]]:
             pts: list[tuple[float, float]] = []
             for i in range(count):
@@ -621,7 +625,7 @@ class PygameArenaWindow:
                 b += (3.0 * ((1.0 - u) ** 2) * u) * p1
                 b += (3.0 * (1.0 - u) * (u ** 2)) * p2
                 b += (u ** 3) * p3
-                # Traveling wave: tail lags head by ~0.25s.
+                # Traveling wave: phase offset interpolated linearly — tail lags head by tail_delay_s.
                 seg_time = t - (1.0 - u) * tail_delay_s
                 wave = math.sin(OMEGA * seg_time + u * 1.6)
                 x = b.x + amp * wave
@@ -635,73 +639,79 @@ class PygameArenaWindow:
         dj = pygame.transform.smoothscale(dj_src, (dj_w, dj_h))
         dj_rect = dj.get_rect(midbottom=(int(cx), int(gap_bottom + 4)))
 
-        # Snake anchors on the board:
-        # - tail exits from the back/top edge (behind equipment)
-        # - head emerges from center mixer/crossfader area
-        OMEGA = math.tau / 2.4  # ~2.4s loop; smooth infinite groove
-        mixer_anchor = pygame.Vector2(
-            dj_rect.x + dj_w * 0.50,
-            dj_rect.y + dj_h * 0.45,
-        )
-        back_anchor = pygame.Vector2(
-            dj_rect.x + dj_w * 0.50,
-            dj_rect.y + dj_h * 0.16,
-        )
+        OMEGA = math.tau / 1.75  # ~1.75s per sway cycle (within 1.5–2s range)
 
-        head_sway = math.sin(OMEGA * t)  # head leads
-        tail_sway = math.sin(OMEGA * (t - 0.25))  # tail lags by 0.25s
+        # Anchor points derived from the DJ board bounding rect:
+        # - tail_anchor: top-center of the board (snake exits behind the equipment)
+        # - head_anchor: center of the board, slightly above (over the mixer/crossfader area)
+        tail_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top)
+        head_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.centery - dj_h * 0.08)
 
-        base_x = mixer_anchor.x + head_sway * 4.5 + float(self._dj_head_variation) * 0.35
-        base_y = mixer_anchor.y + math.sin(OMEGA * (t - 0.10)) * 1.4
+        head_sway = math.sin(OMEGA * t)           # head leads
+        tail_sway = math.sin(OMEGA * (t - 0.30))  # tail lags by 0.3s
+
+        # Head base position: sways ~20px laterally from head_anchor
+        base_x = head_anchor.x + head_sway * 20.0 + float(self._dj_head_variation) * 0.35
+        base_y = head_anchor.y + math.sin(OMEGA * (t - 0.10)) * 1.4
         base = pygame.Vector2(base_x, base_y)
 
+        # Tail position: sways ~20px laterally from tail_anchor, with 0.3s phase lag
         back = pygame.Vector2(
-            back_anchor.x + tail_sway * 11.0 + float(self._dj_tail_variation.x) * 0.35,
-            back_anchor.y + math.cos(OMEGA * (t - 0.25)) * 2.0 + float(self._dj_tail_variation.y) * 0.25,
+            tail_anchor.x + tail_sway * 20.0 + float(self._dj_tail_variation.x) * 0.35,
+            tail_anchor.y + math.cos(OMEGA * (t - 0.30)) * 2.0 + float(self._dj_tail_variation.y) * 0.25,
         )
         tail_tip = pygame.Vector2(
-            back.x + tail_sway * 6.0,
-            back.y - 24.0 + math.cos(OMEGA * (t - 0.20)) * 1.4,
+            back.x + tail_sway * 10.0,
+            back.y - 24.0 + math.cos(OMEGA * (t - 0.25)) * 1.4,
         )
 
         # Head pivots from the mixer base (transform-origin at base).
         head_tilt = math.radians(10.0) * head_sway
-        head_len = 58.0
+        head_len = 28.0
         head = pygame.Vector2(
             base.x + math.sin(head_tilt) * head_len + float(self._dj_head_variation) * 0.55,
-            base.y - math.cos(head_tilt) * head_len + math.cos(OMEGA * t + 0.25) * 2.8,
+            base.y + math.cos(head_tilt) * head_len + math.cos(OMEGA * t + 0.25) * 2.8,
         )
         if state == "wind_up":
             head.y -= 7.0 * throw_progress
         elif state == "throw":
             head.y += 3.0 * throw_progress
 
-        # Behind-board section (tail + back body) — lower z than the DJ board.
+        # LAYERING 1: Behind-board section (tail + back body) — below the DJ board surface.
         back_curve = _bezier_points(
             tail_tip,
             pygame.Vector2(back.x + 7.0, back.y + 10.0),
             pygame.Vector2(base.x - 12.0, base.y + 14.0),
             base,
             count=18,
-            amp=3.6,
+            amp=18.0,
         )
         _draw_serpent_points(back_curve, radius_scale=0.82)
 
-        # Board surface drawn on top of the tail section.
+        # LAYERING 2: Board surface drawn on top of the tail section.
         self.screen.blit(dj, dj_rect.topleft)
 
-        # Front section (base -> head) — above mixer and board elements.
+        # LAYERING 3: Front section (base -> head) — above the DJ board surface.
         front_curve = _bezier_points(
             base,
-            pygame.Vector2(base.x + 6.0, base.y - 24.0),
-            pygame.Vector2(head.x - 8.0, head.y + 16.0),
+            pygame.Vector2(base.x + 6.0, base.y - 42.0),
+            pygame.Vector2(head.x - 8.0, head.y - 22.0),
             head,
             count=20,
-            amp=5.0,
+            amp=20.0,
         )
         _draw_serpent_points(front_curve, radius_scale=0.96)
 
-        # Direction at head for face and headphones alignment.
+        # Debug: red dots at tail_anchor, head_anchor, and every body segment point.
+        if DEBUG_DJ:
+            pygame.draw.circle(self.screen, (255, 0, 0), (int(tail_anchor.x), int(tail_anchor.y)), 6)
+            pygame.draw.circle(self.screen, (255, 0, 0), (int(head_anchor.x), int(head_anchor.y)), 6)
+            for pt in back_curve:
+                pygame.draw.circle(self.screen, (255, 0, 0), (int(pt[0]), int(pt[1])), 3)
+            for pt in front_curve:
+                pygame.draw.circle(self.screen, (255, 0, 0), (int(pt[0]), int(pt[1])), 3)
+
+        # Direction at head tip for face and headphones alignment.
         hx_f, hy_f = front_curve[-1]
         dir_x = hx_f - front_curve[-2][0]
         dir_y = hy_f - front_curve[-2][1]
@@ -720,17 +730,12 @@ class PygameArenaWindow:
         snout_y = int(hy + dir_y * (head_r - 2))
         pygame.draw.circle(self.screen, (34, 108, 24), (snout_x, snout_y), max(4, head_r - 5))
 
+        # Two small white dot eyes.
         for sign in (-1, 1):
-            ex = int(hx + perp_x * sign * (head_r * 0.55) + dir_x * 5)
-            ey = int(hy + perp_y * sign * (head_r * 0.55) + dir_y * 5)
-            glow_s = pygame.Surface((34, 34), pygame.SRCALPHA)
-            pygame.draw.circle(glow_s, (0, 220, 60, 56), (17, 17), 12)
-            pygame.draw.circle(glow_s, (0, 255, 90, 98), (17, 17), 7)
-            self.screen.blit(glow_s, (ex - 17, ey - 17))
-            pygame.draw.circle(self.screen, (0, 255, 100), (ex, ey), 4)
-            pup_a = (int(ex - dir_x * 1.3), int(ey - dir_y * 1.3))
-            pup_b = (int(ex + dir_x * 1.3), int(ey + dir_y * 1.3))
-            pygame.draw.line(self.screen, (0, 0, 0), pup_a, pup_b, 2)
+            ex = int(hx + perp_x * sign * (head_r * 0.52) + dir_x * 5)
+            ey = int(hy + perp_y * sign * (head_r * 0.52) + dir_y * 5)
+            pygame.draw.circle(self.screen, (240, 240, 240), (ex, ey), 4)
+            pygame.draw.circle(self.screen, (10, 10, 10), (ex, ey), 2)
 
         # Headphones aligned to head orientation.
         cup_offset_side = head_r * 0.94
@@ -1093,6 +1098,14 @@ class PygameArenaWindow:
                 elif event.key == pygame.K_r and self.show_result_screen:
                     self.return_to_lobby_requested = True
                     self.running = False
+                    try:
+                        lobby_file = SOUNDS_DIR / "preolobby-lobby.mpeg"
+                        if lobby_file.exists():
+                            pygame.mixer.music.stop()
+                            pygame.mixer.music.load(str(lobby_file))
+                            pygame.mixer.music.play(-1)
+                    except Exception:
+                        pass
                 elif event.key == pygame.K_c:
                     self.cheer_pulse_until_ms = pygame.time.get_ticks() + 650
                 elif event.key == pygame.K_t:
@@ -2374,6 +2387,7 @@ class PygameArenaWindow:
                 if opponent_name is not None:
                     self.snake_b_skin = self.skin_by_username[opponent_name]
                 self.last_server_message = f"Match started ({self.active_game_id})"
+                self._play_game_sound()
                 return
             if action == "spectate_joined":
                 joined_game_id = str(payload.get("game_id", self.active_game_id or "")).strip() or self.active_game_id
@@ -2391,6 +2405,8 @@ class PygameArenaWindow:
             self.active_game_id = payload.get("game_id", self.active_game_id)
             state = payload.get("state", {})
             self._sync_from_game_state(state)
+            if not self.has_authoritative_state:
+                self._play_game_sound()
             self.has_authoritative_state = True
             self.last_server_message = "Game state updated"
             return
@@ -2427,6 +2443,23 @@ class PygameArenaWindow:
 
         if msg_type == "socket_error":
             self._mark_connection_issue(str(payload.get("message", "Lost connection.")))
+
+    def _play_game_sound(self) -> None:
+        if self._game_sound_started:
+            return
+        self._game_sound_started = True
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            game_file = SOUNDS_DIR / "game sound.mpeg"
+            if game_file.exists():
+                pygame.mixer.music.stop()
+                pygame.mixer.music.load(str(game_file))
+                pygame.mixer.music.play(-1)
+            else:
+                print(f"[audio] game sound not found: {game_file}")
+        except Exception as exc:
+            print(f"[audio] _play_game_sound failed: {exc}")
 
     def _mark_connection_issue(self, message: str) -> None:
         self.connection_healthy  = False
