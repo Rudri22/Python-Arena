@@ -16,6 +16,11 @@ from typing import Any
 from uuid import uuid4
 
 from server.game_engine import (
+    BOARD_HEIGHT,
+    BOARD_WIDTH,
+    GAP_COL_END,
+    GAP_COL_START,
+    GAP_ROW_END,
     MatchRuntime,
     create_match_runtime,
     queue_direction,
@@ -57,6 +62,8 @@ class ServerState:
     _username_to_client: dict[str, str] = field(default_factory=dict)
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
     _client_skins: dict[str, SnakeSkin] = field(default_factory=dict)
+    # Keyed by normalized username for case-insensitive stability.
+    _wins_by_user: dict[str, int] = field(default_factory=dict)
     # Per-online-username reconnect/session version to detect leave+rejoin.
     _user_session_versions: dict[str, int] = field(default_factory=dict)
     _next_user_session_version: int = 1
@@ -198,6 +205,7 @@ class ServerState:
             self._client_usernames[client_id] = username
             self._username_to_client[normalized_username] = client_id
             self._user_session_versions[username] = self._next_user_session_version
+            self._wins_by_user[normalized_username] = self._wins_by_user.get(normalized_username, 0)
             self._next_user_session_version += 1
             return True, "accepted"
 
@@ -242,6 +250,45 @@ class ServerState:
                     continue
                 result[username] = self._user_session_versions.get(username, 0)
             return result
+
+    def get_online_user_wins(self) -> dict[str, int]:
+        """Return online usernames mapped to authoritative win totals."""
+
+        with self._lock:
+            result: dict[str, int] = {}
+            for username in self._client_usernames.values():
+                if username is None:
+                    continue
+                result[username] = int(self._wins_by_user.get(_normalize_username(username), 0))
+            return result
+
+    def get_active_matches_snapshot(self) -> list[dict[str, Any]]:
+        """Return active match ids with current player pairs for lobby routing."""
+
+        with self._lock:
+            snapshot: list[dict[str, Any]] = []
+            for game_id, players in self._active_matches.items():
+                runtime = self._match_runtimes.get(game_id)
+                if runtime is None or runtime.status != "running":
+                    continue
+                snapshot.append(
+                    {
+                        "game_id": game_id,
+                        "players": [str(players[0]), str(players[1])],
+                    }
+                )
+            return snapshot
+
+    def record_win(self, username: str) -> bool:
+        """Increment one player's win total when username resolves online identity."""
+
+        with self._lock:
+            canonical = self._resolve_username(username)
+            if canonical is None:
+                return False
+            canonical_cf = _normalize_username(canonical)
+            self._wins_by_user[canonical_cf] = int(self._wins_by_user.get(canonical_cf, 0)) + 1
+            return True
 
     def get_client_sockets(self) -> list[socket.socket]:
         """Return currently connected sockets for broadcast operations."""
@@ -630,6 +677,12 @@ class ServerState:
                     if runtime.countdown_ticks > 0:
                         runtime.countdown_ticks -= 1
                     else:
+                        # Timer must be real-time authoritative and independent
+                        # from movement/input cadence.
+                        now = time.monotonic()
+                        if runtime.started_at_monotonic is None:
+                            runtime.started_at_monotonic = now
+                        runtime.tick = max(0, int(now - runtime.started_at_monotonic))
                         step_runtime(runtime)
 
                 players = self._active_matches.get(game_id)
@@ -643,9 +696,13 @@ class ServerState:
                         username: runtime.snakes[username].health
                         for username in runtime.players
                     }
+                    winner = runtime.winner or "draw"
+                    if winner and str(winner).casefold() not in {"draw", "none", "-"}:
+                        winner_cf = _normalize_username(str(winner))
+                        self._wins_by_user[winner_cf] = int(self._wins_by_user.get(winner_cf, 0)) + 1
                     game_over_payload = {
                         "game_id": game_id,
-                        "winner": runtime.winner or "draw",
+                        "winner": winner,
                         "final_scores": final_scores,
                         "reason": runtime.end_reason or "match_finished",
                     }
@@ -761,6 +818,78 @@ class ServerState:
                 if sock is not None:
                     sockets.append(sock)
             return sockets
+
+    def spawn_blob_pie(
+        self,
+        *,
+        actor: str,
+        game_id: str | None,
+        x: int,
+        y: int,
+        kind: str,
+    ) -> tuple[bool, str]:
+        """
+        Spawn one serpent-blob pie from a client landing event.
+
+        The server validates ownership, match, cell bounds, and occupancy so
+        clients remain synchronized and safe from stale/local-only state.
+        """
+
+        with self._lock:
+            canonical_actor = self._resolve_username(actor)
+            if canonical_actor is None:
+                return False, "user_offline"
+
+            actor_game_id = self._user_to_match.get(canonical_actor)
+            if actor_game_id is None:
+                return False, "user_not_in_match"
+            if game_id is not None and game_id != actor_game_id:
+                return False, "game_mismatch"
+
+            runtime = self._match_runtimes.get(actor_game_id)
+            if runtime is None or runtime.status != "running":
+                return False, "match_not_running"
+
+            if x < 1 or y < 1 or x >= BOARD_WIDTH - 1 or y >= BOARD_HEIGHT - 1:
+                return False, "out_of_bounds"
+            if GAP_COL_START <= x < GAP_COL_END and y < GAP_ROW_END:
+                return False, "out_of_bounds"
+
+            cell = (x, y)
+            if cell in runtime.obstacles:
+                return False, "occupied"
+            if cell in runtime.pies:
+                return False, "occupied"
+            for snake in runtime.snakes.values():
+                if cell in snake.body:
+                    return False, "occupied"
+
+            kind_key = str(kind).strip().lower()
+            if kind_key == "orange":
+                metadata: dict[str, object] = {
+                    "kind": "orange",
+                    "effect": "opponent_damage",
+                    "amount": 20,
+                    "points": -20,
+                }
+            elif kind_key == "red":
+                metadata = {
+                    "kind": "red",
+                    "effect": "self_damage",
+                    "amount": 20,
+                    "points": -20,
+                }
+            else:
+                metadata = {
+                    "kind": "green",
+                    "effect": "self_heal",
+                    "amount": 15,
+                    "points": 15,
+                }
+
+            runtime.pies[cell] = metadata
+            runtime.pie_counter += 1
+            return True, "spawned"
 
     def get_idle_users(self) -> list[str]:
         """Sprint 5 PBI 5.3: list online users who are not in active matches."""

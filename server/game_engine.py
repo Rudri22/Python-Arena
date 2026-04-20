@@ -12,6 +12,7 @@ This module owns the authoritative match simulation used by the server:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from shared.protocol import (
@@ -31,7 +32,7 @@ BOARD_WIDTH = 20
 BOARD_HEIGHT = 20
 INITIAL_SNAKE_LENGTH = 3
 # Temporary tuning for local testing: keep players alive much longer.
-INITIAL_HEALTH = 1000
+INITIAL_HEALTH = 1_000_000
 DEFAULT_PIE_HEALTH_GAIN = 15
 WALL_COLLISION_DAMAGE = 20
 OTHER_SNAKE_COLLISION_DAMAGE = 20
@@ -62,8 +63,9 @@ STATIC_OBSTACLES: tuple[tuple[int, int], ...] = (
 )
 
 PIE_TYPES: tuple[dict[str, object], ...] = (
-    {"kind": "apple", "health_delta": 15, "points": 15},
-    {"kind": "golden", "health_delta": 25, "points": 25},
+    {"kind": "green", "effect": "self_heal", "amount": 15, "points": 15},
+    {"kind": "orange", "effect": "opponent_damage", "amount": 20, "points": -20},
+    {"kind": "red", "effect": "self_damage", "amount": 20, "points": -20},
 )
 
 _DIRECTIONS: dict[str, tuple[int, int]] = {
@@ -112,6 +114,8 @@ class MatchRuntime:
     pie_counter: int = 1
     lockstep_moves: dict[str, bool] = field(default_factory=dict)
     countdown_ticks: int = 25  # ~3 s at 0.12 s/tick; frozen until this reaches 0
+    # Authoritative wall-clock start (set when countdown completes).
+    started_at_monotonic: float | None = None
 
 
 def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRuntime:
@@ -145,8 +149,6 @@ def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRun
         pies={},
         lockstep_moves={player_a: False, player_b: False},
     )
-    # Pies are not auto-spawned: they are only created when the arena serpent's
-    # poison blob lands on the island (client drives this via blob-landing events).
     return runtime
 
 
@@ -189,8 +191,6 @@ def step_runtime(runtime: MatchRuntime) -> None:
 
     if runtime.status != "running":
         return
-
-    runtime.tick += 1
 
     # Apply queued directions before moving heads.
     for player, snake in runtime.snakes.items():
@@ -274,13 +274,22 @@ def step_runtime(runtime: MatchRuntime) -> None:
         else:
             ate_pie = True
             runtime.pies.pop(next_head, None)
-            gained = int(pie_info.get("health_delta", DEFAULT_PIE_HEALTH_GAIN))
-            snake.health += gained
+            effect = str(pie_info.get("effect", "self_heal"))
+            amount = int(pie_info.get("amount", DEFAULT_PIE_HEALTH_GAIN))
+            if effect == "self_heal":
+                snake.health += amount
+            elif effect == "self_damage":
+                snake.health = max(0, snake.health - amount)
+            elif effect == "opponent_damage":
+                opponent = next((name for name in runtime.players if name != player), None)
+                if opponent is not None and opponent in runtime.snakes:
+                    runtime.snakes[opponent].health = max(0, runtime.snakes[opponent].health - amount)
 
         snake.alive = snake.health > 0
 
-    # No auto-refill: pies arrive only from serpent-blob landings (client-driven).
-    _ = ate_pie  # retained for potential future scoring hooks
+    # Re-evaluate alive flags because opponent-damage pies can kill the other snake.
+    for snake in runtime.snakes.values():
+        snake.alive = snake.health > 0
 
     _update_match_status(runtime)
 
@@ -343,6 +352,18 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
         status=runtime.status,
     )
     state_dict = state_to_dict(state)
+    # Include pie metadata so clients can render green/orange/red variants.
+    state_dict["pies"] = [
+        {
+            "pie_id": f"pie-{runtime.pie_counter}-{idx}",
+            "position": {"x": x, "y": y},
+            "points": int(metadata.get("points", 1)),
+            "kind": str(metadata.get("kind", "green")),
+            "effect": str(metadata.get("effect", "self_heal")),
+            "amount": int(metadata.get("amount", DEFAULT_PIE_HEALTH_GAIN)),
+        }
+        for idx, ((x, y), metadata) in enumerate(sorted(runtime.pies.items()), start=1)
+    ]
     # Sprint 5 compatibility helper:
     # Provide numeric state for clients that expect 1=running, 0=not-running.
     state_dict["status_code"] = 1 if runtime.status == "running" else 0

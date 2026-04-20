@@ -65,7 +65,7 @@ GAP_COL_START = SIDE_EXTENSION_TILES                      # col 5
 GAP_COL_END   = GRID_COLS - SIDE_EXTENSION_TILES          # col 15
 GAP_ROW_END   = int(SIDE_EXTENSION_ROWS * TILE_SIZE / GAME_CELL_H) + 1  # ≈ row 7
 BASE_SNAKE_LENGTH = 3
-LOCAL_INITIAL_HEALTH = 1000
+LOCAL_INITIAL_HEALTH = 1_000_000
 HEALTH_PER_GROWTH_SEGMENT = 10
 PIE_HEALTH_GAIN = 15
 OBSTACLE_COLLISION_DAMAGE = 20
@@ -77,6 +77,10 @@ STATIC_OBSTACLES_GAME: tuple[tuple[int, int], ...] = (
     (9, 7), (10, 7), (9, 12), (10, 12), (5, 10), (14, 10),
 )
 BERRY_COLOR  = (200, 255, 100)
+# Serpent-blob pie spawn mix (green is most common).
+PIE_GREEN_CHANCE = 0.62
+PIE_ORANGE_CHANCE = 0.24
+# Remaining probability goes to red.
 # HUD palette
 HUD_BG       = (12, 16, 24)
 HUD_TEXT     = (230, 240, 248)
@@ -112,6 +116,7 @@ class PygameArenaWindow:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.key.set_repeat(350, 35)
         self.clock = pygame.time.Clock()
         self.running = True
 
@@ -270,20 +275,25 @@ class PygameArenaWindow:
         self.incoming_queue: queue.Queue[dict] = queue.Queue()
         self.username_confirmed = False
         self.online_users: list[str] = []
+        self.active_matches: list[dict[str, object]] = []
         self.pending_invite_to: str | None = None
         self.pending_invite_sent_ms = 0
         self.pending_spectate_to: str | None = None
+        self.pending_spectate_game_id: str | None = None
         self.active_game_id: str | None = None
         self.has_authoritative_state = False
         self.match_status = "waiting"
         self.match_winner = "-"
         self.countdown_ticks = 0
+        self.timer_total = 300
         self.timer_remaining = 0
         self.timer_elapsed = 0
+        self._timer_anchor_ms: int | None = None
         self.connection_healthy = True
         self.connection_notice = ""
         self.player_a_name = username
         self.player_b_name = "Opponent"
+        self.match_players: tuple[str, str] | None = None
         self.last_server_message = "Connecting..."
         self.last_move_ms = now_ms
         self.direction_bindings = load_direction_bindings()
@@ -296,7 +306,7 @@ class PygameArenaWindow:
         self.snake_b_direction = "left"
         self.snake_a_health = LOCAL_INITIAL_HEALTH
         self.snake_b_health = LOCAL_INITIAL_HEALTH
-        self.game_pies: list[tuple[int, int]] = []
+        self.game_pies: dict[tuple[int, int], str] = {}
         self.game_obstacles: list[tuple[int, int]] = []
 
         # ── Interpolation ──────────────────────────────────────────────
@@ -317,6 +327,7 @@ class PygameArenaWindow:
         self.return_to_lobby_requested = False
         self.chat_messages: deque[str] = deque(maxlen=6)
         self.chat_input = ""
+        self.chat_cursor = 0
         self.chat_typing = False
         self.cheer_pulse_until_ms = 0
 
@@ -716,6 +727,7 @@ class PygameArenaWindow:
                     self.cheer_pulse_until_ms = pygame.time.get_ticks() + 650
                 elif event.key == pygame.K_t:
                     self.chat_typing = True
+                    self.chat_cursor = len(self.chat_input)
                 self._handle_direction_input(event.key)
 
     def _handle_chat_key(self, event: pygame.event.Event) -> bool:
@@ -724,20 +736,44 @@ class PygameArenaWindow:
                 self._submit_chat()
             else:
                 self.chat_typing = True
+                self.chat_cursor = len(self.chat_input)
             return True
         if event.key == pygame.K_ESCAPE and self.chat_typing:
             self.chat_typing = False
             self.chat_input = ""
+            self.chat_cursor = 0
             return True
         if not self.chat_typing:
             return False
         if event.key == pygame.K_BACKSPACE:
-            self.chat_input = self.chat_input[:-1]
+            if self.chat_cursor > 0:
+                self.chat_input = self.chat_input[: self.chat_cursor - 1] + self.chat_input[self.chat_cursor :]
+                self.chat_cursor -= 1
+            return True
+        if event.key == pygame.K_DELETE:
+            if self.chat_cursor < len(self.chat_input):
+                self.chat_input = self.chat_input[: self.chat_cursor] + self.chat_input[self.chat_cursor + 1 :]
+            return True
+        if event.key == pygame.K_LEFT:
+            self.chat_cursor = max(0, self.chat_cursor - 1)
+            return True
+        if event.key == pygame.K_RIGHT:
+            self.chat_cursor = min(len(self.chat_input), self.chat_cursor + 1)
+            return True
+        if event.key == pygame.K_HOME:
+            self.chat_cursor = 0
+            return True
+        if event.key == pygame.K_END:
+            self.chat_cursor = len(self.chat_input)
             return True
         if event.unicode and event.unicode.isprintable():
-            self.chat_input += event.unicode
-            if len(self.chat_input) > 120:
-                self.chat_input = self.chat_input[:120]
+            if len(self.chat_input) < 120:
+                self.chat_input = (
+                    self.chat_input[: self.chat_cursor]
+                    + event.unicode
+                    + self.chat_input[self.chat_cursor :]
+                )
+                self.chat_cursor = min(len(self.chat_input), self.chat_cursor + len(event.unicode))
             return True
         return False
 
@@ -745,6 +781,7 @@ class PygameArenaWindow:
         text = self.chat_input.strip()
         self.chat_typing = False
         self.chat_input = ""
+        self.chat_cursor = 0
         if not text or self.connection is None:
             return
         try:
@@ -1265,15 +1302,18 @@ class PygameArenaWindow:
                 blob["splat_at"] = ticks
                 blob["splat_x"] = blob["x"]
                 blob["splat_y"] = blob["target_y"]
-                # Blob landing spawns a collectible health berry — only on valid island tiles.
+                # Spawn pie through server so it is synchronized across clients.
                 gcol = int((blob["x"] - self.game_origin_x) / GAME_CELL_W)
                 grow = int((blob["target_y"] - self.game_origin_y) / GAME_CELL_H)
                 if not self._is_out_of_bounds(gcol, grow):
-                    cell = (gcol, grow)
-                    occupied = (set(self.game_obstacles) | set(self.snake_a)
-                                | set(self.snake_b) | set(self.game_pies))
-                    if cell not in occupied:
-                        self.game_pies.append(cell)
+                    roll = random.random()
+                    if roll < PIE_GREEN_CHANCE:
+                        pie_kind = "green"
+                    elif roll < PIE_GREEN_CHANCE + PIE_ORANGE_CHANCE:
+                        pie_kind = "orange"
+                    else:
+                        pie_kind = "red"
+                    self._send_blob_pie_spawn(cell_x=gcol, cell_y=grow, kind=pie_kind)
                 survivors.append(blob)
                 continue
             if blob["x"] < -60 or blob["x"] > WINDOW_WIDTH + 60 or blob["y"] > WINDOW_HEIGHT + 60:
@@ -1848,6 +1888,22 @@ class PygameArenaWindow:
 
         if msg_type == MessageType.ONLINE_USERS.value:
             self.online_users = list(payload.get("users", []))
+            active_matches_payload = payload.get("active_matches", [])
+            parsed_active_matches: list[dict[str, object]] = []
+            if isinstance(active_matches_payload, list):
+                for item in active_matches_payload:
+                    if not isinstance(item, dict):
+                        continue
+                    game_id = str(item.get("game_id", "")).strip()
+                    players_raw = item.get("players", [])
+                    if not game_id or not isinstance(players_raw, list) or len(players_raw) < 2:
+                        continue
+                    p1 = str(players_raw[0]).strip()
+                    p2 = str(players_raw[1]).strip()
+                    if not p1 or not p2:
+                        continue
+                    parsed_active_matches.append({"game_id": game_id, "players": [p1, p2]})
+            self.active_matches = parsed_active_matches
             self.username_confirmed = any(
                 u.casefold() == self.username.casefold() for u in self.online_users
             )
@@ -1877,6 +1933,7 @@ class PygameArenaWindow:
                 return
             if action == "match_started":
                 self.active_game_id = payload.get("game_id")
+                self._timer_anchor_ms = pygame.time.get_ticks()
                 self.pending_invite_to = None
                 self._reset_local_round_layout()
                 skins_payload = payload.get("skins", {})
@@ -1896,8 +1953,12 @@ class PygameArenaWindow:
                 self.last_server_message = f"Match started ({self.active_game_id})"
                 return
             if action == "spectate_joined":
-                self.active_game_id = payload.get("game_id", self.active_game_id)
+                joined_game_id = str(payload.get("game_id", self.active_game_id or "")).strip() or self.active_game_id
+                self.active_game_id = joined_game_id
+                if self._timer_anchor_ms is None:
+                    self._timer_anchor_ms = pygame.time.get_ticks()
                 self.pending_spectate_to = None
+                self.pending_spectate_game_id = None
                 return
             if action in {"declined", "cancelled"}:
                 self.pending_invite_to = None
@@ -1934,6 +1995,7 @@ class PygameArenaWindow:
             if "invitation" in low or "busy" in low or "offline" in low:
                 self.pending_invite_to  = None
                 self.pending_spectate_to = None
+                self.pending_spectate_game_id = None
                 if self.spectator_mode:
                     self._maybe_request_spectate()
                 else:
@@ -1982,21 +2044,63 @@ class PygameArenaWindow:
             return
         if self.pending_spectate_to is not None:
             return
-        targets = [u for u in self.online_users if u.casefold() != self.username.casefold()]
-        if not targets:
+        if not self.active_matches:
             return
-        preferred = self.preferred_opponent
+        preferred = (self.preferred_opponent or "").strip().casefold()
+        chosen_match: dict[str, object] | None = None
         if preferred:
-            target = next((u for u in targets if u.casefold() == preferred.casefold()), None)
-            if target is None:
-                return
-        else:
-            target = targets[0]
+            for match in self.active_matches:
+                players = match.get("players", [])
+                if not isinstance(players, list):
+                    continue
+                if any(str(player).casefold() == preferred for player in players):
+                    chosen_match = match
+                    break
+        if chosen_match is None:
+            chosen_match = self.active_matches[-1]
+
+        players = chosen_match.get("players", [])
+        if not isinstance(players, list) or len(players) < 2:
+            return
+        game_id = str(chosen_match.get("game_id", "")).strip() or None
+        if game_id is None:
+            return
+        target = next(
+            (str(player) for player in players if str(player).casefold() != self.username.casefold()),
+            str(players[0]),
+        )
         self.connection.send_message(
-            make_invitation_message(from_user=self.username, to_user=target, action="spectate")
+            make_invitation_message(from_user=self.username, to_user=target, action="spectate", game_id=game_id)
         )
         self.pending_spectate_to    = target
-        self.last_server_message    = f"Spectating {target}..."
+        self.pending_spectate_game_id = game_id
+        self.last_server_message    = f"Spectating {target} ({game_id})..."
+
+    def _is_primary_match_client(self) -> bool:
+        if not self.match_players:
+            return False
+        p1, p2 = self.match_players
+        primary = min((p1, p2), key=str.casefold)
+        return self.username.casefold() == primary.casefold()
+
+    def _send_blob_pie_spawn(self, *, cell_x: int, cell_y: int, kind: str) -> None:
+        if self.connection is None or self.active_game_id is None:
+            return
+        if self.spectator_mode or not self._is_primary_match_client():
+            return
+        msg = make_invitation_message(
+            from_user=self.username,
+            to_user=self.username,
+            action="spawn_pie",
+            game_id=self.active_game_id,
+        )
+        msg["payload"]["x"] = int(cell_x)
+        msg["payload"]["y"] = int(cell_y)
+        msg["payload"]["kind"] = kind
+        try:
+            self.connection.send_message(msg)
+        except OSError:
+            pass
 
     # ==================================================================
     # Gameplay: state sync + interpolation
@@ -2006,6 +2110,11 @@ class PygameArenaWindow:
         old_a = list(self.snake_a)
         old_b = list(self.snake_b)
         snakes = state.get("snakes", [])
+        if len(snakes) >= 2:
+            n1 = str(snakes[0].get("player", "")).strip()
+            n2 = str(snakes[1].get("player", "")).strip()
+            if n1 and n2:
+                self.match_players = (n1, n2)
         my_snake = None
         opp_snake = None
 
@@ -2053,20 +2162,18 @@ class PygameArenaWindow:
             self.snake_b_skin = self.skin_by_username.get(self.player_b_name, self.snake_b_skin)
 
         pies_raw = state.get("pies", [])
-        if pies_raw:
-            self.game_pies = [
-                (px, py)
-                for p in pies_raw
-                for px, py in [(
-                    int(p.get("position", {}).get("x", 0)),
-                    int(p.get("position", {}).get("y", 0)),
-                )]
-                if not self._is_out_of_bounds(px, py)
-            ]
-
-        # Blob-spawned pies live only on the client — the server's authoritative
-        # snake update won't remove them. Consume any pie a snake head just moved onto.
-        self._consume_local_pies_on_heads()
+        parsed_pies: dict[tuple[int, int], str] = {}
+        for p in pies_raw:
+            pos = p.get("position", {})
+            px = int(pos.get("x", 0))
+            py = int(pos.get("y", 0))
+            if self._is_out_of_bounds(px, py):
+                continue
+            kind = str(p.get("kind", "green")).strip().lower()
+            if kind not in {"green", "orange", "red"}:
+                kind = "green"
+            parsed_pies[(px, py)] = kind
+        self.game_pies = parsed_pies
 
         obs_raw = state.get("obstacles", [])
         if obs_raw:
@@ -2076,12 +2183,24 @@ class PygameArenaWindow:
             ]
 
         timer = state.get("timer", {})
+        self.timer_total = int(timer.get("total_seconds", self.timer_total))
         self.timer_remaining = int(timer.get("remaining_seconds", self.timer_remaining))
         self.timer_elapsed   = int(timer.get("elapsed_seconds",   self.timer_elapsed))
+        if self.timer_elapsed > 0:
+            self._timer_anchor_ms = pygame.time.get_ticks() - int(self.timer_elapsed * 1000)
         self.match_status    = str(state.get("status", self.match_status))
         self.match_winner    = str(state.get("winner") or self.match_winner)
         self.countdown_ticks = int(state.get("countdown", 0))
-        self._start_state_interpolation(old_a, old_b)
+        if self.spectator_mode:
+            self.render_snake_a = [(float(x), float(y)) for x, y in self.snake_a]
+            self.render_snake_b = [(float(x), float(y)) for x, y in self.snake_b]
+            self.interp_from_snake_a = []
+            self.interp_from_snake_b = []
+            self.interp_to_snake_a = []
+            self.interp_to_snake_b = []
+            self.state_interp_start_ms = 0
+        else:
+            self._start_state_interpolation(old_a, old_b)
 
     def _start_state_interpolation(self, old_a: list, old_b: list) -> None:
         def to_float(cells: list) -> list:
@@ -2188,31 +2307,7 @@ class PygameArenaWindow:
 
     def _reset_local_round_layout(self) -> None:
         self.game_obstacles = list(STATIC_OBSTACLES_GAME)
-        self.game_pies = []  # berries come only from serpent blob landings
-
-    def _consume_local_pies_on_heads(self) -> None:
-        """Remove any blob-spawned pie that sits under a snake head and heal locally.
-
-        Needed because blob pies are client-only; the server's snake step won't
-        flag them as eaten, so without this they'd phase right through the snake.
-        """
-
-        if not self.game_pies:
-            return
-        pies = set(self.game_pies)
-        eaten: set[tuple[int, int]] = set()
-        if self.snake_a:
-            head_a = self.snake_a[0]
-            if head_a in pies:
-                eaten.add(head_a)
-                self.snake_a_health += PIE_HEALTH_GAIN
-        if self.snake_b:
-            head_b = self.snake_b[0]
-            if head_b in pies:
-                eaten.add(head_b)
-                self.snake_b_health += PIE_HEALTH_GAIN
-        if eaten:
-            self.game_pies = [p for p in self.game_pies if p not in eaten]
+        self.game_pies = {}
 
     def _adjust_snake_length(self, snake_cells: list, health: int) -> None:
         growth = max(0, (health - LOCAL_INITIAL_HEALTH) // HEALTH_PER_GROWTH_SEGMENT)
@@ -2253,8 +2348,16 @@ class PygameArenaWindow:
         ate = next_head in self.game_pies
         snake_cells.insert(0, next_head)
         if ate:
-            health += PIE_HEALTH_GAIN
-            self.game_pies.remove(next_head)
+            pie_kind = self.game_pies.pop(next_head, "green")
+            if pie_kind == "green":
+                health += PIE_HEALTH_GAIN
+            elif pie_kind == "red":
+                health = max(0, health - 20)
+            elif pie_kind == "orange":
+                if health_attr == "snake_a_health":
+                    self.snake_b_health = max(0, self.snake_b_health - 20)
+                else:
+                    self.snake_a_health = max(0, self.snake_a_health - 20)
         else:
             snake_cells.pop()
         self._adjust_snake_length(snake_cells, health)
@@ -2311,19 +2414,36 @@ class PygameArenaWindow:
 
     def _draw_game_pies(self) -> None:
         ticks = pygame.time.get_ticks()
-        for col, row in self.game_pies:
+        for (col, row), kind in self.game_pies.items():
             cx, cy = self._game_to_pixel(col, row)
             cx, cy = int(cx), int(cy)
             pulse = 0.7 + 0.3 * math.sin(ticks / 400.0 + col * 0.7 + row * 1.3)
             r = max(4, int(GAME_CELL_H * 0.4 - 1 + 2 * pulse))
+            if kind == "orange":
+                body = (255, 142, 22)
+                highlight = (255, 238, 176)
+                glow = (255, 170, 42)
+                rim = (78, 32, 0)
+            elif kind == "red":
+                body = (255, 36, 36)
+                highlight = (255, 216, 210)
+                glow = (255, 78, 78)
+                rim = (70, 0, 0)
+            else:
+                body = BERRY_COLOR
+                highlight = (240, 255, 200)
+                glow = BERRY_COLOR
+                rim = (25, 90, 15)
             # Glow
             gs = pygame.Surface((r * 4 + 4, r * 4 + 4), pygame.SRCALPHA)
-            pygame.draw.circle(gs, (*BERRY_COLOR, int(75 * pulse)), (r * 2 + 2, r * 2 + 2), r + 5)
+            pygame.draw.circle(gs, (*glow, int(105 * pulse)), (r * 2 + 2, r * 2 + 2), r + 6)
             self.screen.blit(gs, (cx - r * 2 - 2, cy - r * 2 - 2))
             # Berry body
-            pygame.draw.circle(self.screen, (25, 90, 15),   (cx, cy), r + 1)
-            pygame.draw.circle(self.screen, BERRY_COLOR,    (cx, cy), r)
-            pygame.draw.circle(self.screen, (240, 255, 200), (cx - r // 3, cy - r // 3), max(2, r // 3))
+            pygame.draw.circle(self.screen, rim, (cx, cy), r + 1)
+            pygame.draw.circle(self.screen, body, (cx, cy), r)
+            pygame.draw.circle(self.screen, highlight, (cx - r // 3, cy - r // 3), max(2, r // 3))
+            if kind in {"orange", "red"}:
+                pygame.draw.circle(self.screen, (252, 252, 252), (cx, cy), r + 2, 1)
 
     def _draw_countdown_overlay(self) -> None:
         """Render a centred 3-2-1 / GO! overlay while the game is frozen."""
@@ -2421,10 +2541,18 @@ class PygameArenaWindow:
 
         # ── Timer — centre ───────────────────────────────────────────
         cx = WINDOW_WIDTH // 2
-        if self.has_authoritative_state and self.timer_remaining > 0:
-            t_str = f"{self.timer_remaining // 60}:{self.timer_remaining % 60:02d}"
+        if self.has_authoritative_state and (self.timer_remaining > 0 or self.timer_elapsed > 0):
+            remaining = self.timer_remaining
+            if remaining <= 0 and self.timer_elapsed > 0:
+                remaining = max(0, int(self.timer_total) - int(self.timer_elapsed))
+            t_str = f"{remaining // 60}:{remaining % 60:02d}"
         elif self.active_game_id:
-            t_str = "—"
+            if self._timer_anchor_ms is not None:
+                local_elapsed = max(0, int((pygame.time.get_ticks() - self._timer_anchor_ms) / 1000))
+                remaining = max(0, int(self.timer_total) - local_elapsed)
+                t_str = f"{remaining // 60}:{remaining % 60:02d}"
+            else:
+                t_str = f"{int(self.timer_total) // 60}:{int(self.timer_total) % 60:02d}"
         else:
             t_str = "lobby"
         t_surf = self.font_hud.render(t_str, True, HUD_ACCENT)
@@ -2433,7 +2561,10 @@ class PygameArenaWindow:
         # ── Chat overlay — bottom of screen ─────────────────────────
         msgs = list(self.chat_messages)[-4:]
         if msgs or self.chat_typing:
-            lines = msgs + ([f"> {self.chat_input}_"] if self.chat_typing else [])
+            typing_line = f"> {self.chat_input}"
+            if self.chat_typing and (pygame.time.get_ticks() // 420) % 2 == 0:
+                typing_line = f"> {self.chat_input[: self.chat_cursor]}|{self.chat_input[self.chat_cursor :]}"
+            lines = msgs + ([typing_line] if self.chat_typing else [])
             ch = len(lines) * 18 + 8
             cy_chat = WINDOW_HEIGHT - ch - 4
             bg = pygame.Surface((620, ch), pygame.SRCALPHA)

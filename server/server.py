@@ -14,7 +14,7 @@ import threading
 import time
 from contextlib import closing
 
-from server.client_handler import handle_client_connection
+from server.client_handler import broadcast_online_users, handle_client_connection
 from server.state import ServerState
 from shared.protocol import make_game_over_message, make_game_state_message
 from shared.utils import encode_message_for_socket
@@ -156,6 +156,9 @@ def _run_game_loop(server_state: ServerState) -> None:
                         _send_socket_message(sock, game_over_message)
                     except OSError:
                         continue
+                # Refresh lobby metadata (idle/active split + win totals) after
+                # match teardown so leaderboard reflects new winner score.
+                broadcast_online_users(server_state)
 
         time.sleep(GAME_TICK_SECONDS)
 

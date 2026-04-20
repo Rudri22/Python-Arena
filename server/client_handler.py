@@ -47,6 +47,8 @@ def broadcast_online_users(server_state: ServerState) -> None:
     message["payload"]["idle_users"] = server_state.get_idle_users()
     message["payload"]["active_players"] = len(users) - len(message["payload"]["idle_users"])
     message["payload"]["user_sessions"] = server_state.get_online_user_sessions()
+    message["payload"]["wins"] = server_state.get_online_user_wins()
+    message["payload"]["active_matches"] = server_state.get_active_matches_snapshot()
 
     for sock in server_state.get_client_sockets():
         try:
@@ -250,6 +252,35 @@ def _handle_invitation_message(
                 action="spectate_left",
             ),
         )
+        return
+
+    if action == "spawn_pie":
+        # Client serpent-blob pie landing request.
+        if from_user.casefold() != sender_username.casefold():
+            send_message(client_socket, make_error_message("Pie spawn sender mismatch."))
+            return
+
+        req_game_id = str(payload.get("game_id", "")).strip() or None
+        try:
+            x = int(payload.get("x"))
+            y = int(payload.get("y"))
+        except (TypeError, ValueError):
+            send_message(client_socket, make_error_message("Pie spawn failed: invalid coordinates."))
+            return
+        kind = str(payload.get("kind", "green")).strip().lower()
+
+        ok, reason = server_state.spawn_blob_pie(
+            actor=sender_username,
+            game_id=req_game_id,
+            x=x,
+            y=y,
+            kind=kind,
+        )
+        if not ok:
+            # Keep this silent for expected races/occupancy during visuals.
+            if reason not in {"occupied", "out_of_bounds"}:
+                send_message(client_socket, make_error_message(f"Pie spawn failed: {reason}."))
+            return
         return
 
     if action == "send":
