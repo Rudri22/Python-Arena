@@ -8,6 +8,20 @@ import pygame
 
 from shared.protocol import SKIN_COLORS, SnakeSkin
 
+# Cache for alpha-blended glow surfaces keyed by (size, color_tuple).
+# Eliminates per-frame Surface allocations which are the primary cause of lag.
+_glow_cache: dict[tuple, pygame.Surface] = {}
+
+
+def _get_glow_surf(size: int, color: tuple) -> pygame.Surface:
+    key = (size, color)
+    if key not in _glow_cache:
+        gs = pygame.Surface((size, size), pygame.SRCALPHA)
+        gc = size // 2
+        pygame.draw.circle(gs, color, (gc, gc), gc - 2)
+        _glow_cache[key] = gs
+    return _glow_cache[key]
+
 
 def _darken(color: tuple[int, int, int], factor: float = 0.6) -> tuple[int, int, int]:
     return (
@@ -161,6 +175,46 @@ def draw_snake_hat(
             pygame.draw.line(surf, _lighten(clr, 50), base_left, (tip_x, tip_y), 1)
             pygame.draw.circle(surf, (250, 240, 210), (tip_x, tip_y - 1), max(2, radius // 4))
 
+    elif hat == "bandana":
+        band_h = max(3, radius // 3)
+        band = pygame.Rect(cx - radius - 1, top - 2, radius * 2 + 2, band_h)
+        pygame.draw.rect(surf, (192, 58, 72), band, border_radius=2)
+        pygame.draw.rect(surf, (110, 28, 42), band, 1, border_radius=2)
+        knot = (cx + radius + 2, top + band_h // 2)
+        pygame.draw.circle(surf, (166, 44, 62), knot, max(2, radius // 4))
+        tail1 = [(knot[0], knot[1]), (knot[0] + radius // 2 + 2, knot[1] + 1), (knot[0] + 2, knot[1] + radius // 2 + 2)]
+        tail2 = [(knot[0], knot[1]), (knot[0] + radius // 2 + 4, knot[1] - 3), (knot[0] + 2, knot[1] - radius // 2 - 1)]
+        pygame.draw.polygon(surf, (178, 48, 68), tail1)
+        pygame.draw.polygon(surf, (206, 72, 94), tail2)
+
+    elif hat == "beanie":
+        cap = pygame.Rect(cx - radius, top - radius + 2, radius * 2, max(6, radius + 4))
+        pygame.draw.ellipse(surf, (74, 112, 188), cap)
+        pygame.draw.ellipse(surf, (46, 76, 136), cap, 2)
+        brim = pygame.Rect(cx - radius - 2, top - 1, radius * 2 + 4, max(3, radius // 3))
+        pygame.draw.rect(surf, (56, 92, 160), brim, border_radius=3)
+        pygame.draw.rect(surf, (34, 62, 120), brim, 1, border_radius=3)
+        pom = (cx, top - radius + 1)
+        pygame.draw.circle(surf, (230, 242, 255), pom, max(2, radius // 4))
+        pygame.draw.circle(surf, (142, 176, 226), pom, max(2, radius // 4), 1)
+
+    elif hat == "horns":
+        horn_l = [
+            (cx - radius + 2, top + 1),
+            (cx - int(radius * 1.35), top - radius + 1),
+            (cx - radius // 3, top - radius // 2),
+        ]
+        horn_r = [
+            (cx + radius - 2, top + 1),
+            (cx + int(radius * 1.35), top - radius + 1),
+            (cx + radius // 3, top - radius // 2),
+        ]
+        for horn in (horn_l, horn_r):
+            pygame.draw.polygon(surf, (224, 210, 178), horn)
+            pygame.draw.polygon(surf, (126, 104, 74), horn, 1)
+        band = pygame.Rect(cx - radius, top + 1, radius * 2, max(2, radius // 4))
+        pygame.draw.rect(surf, (64, 42, 26), band, border_radius=2)
+
 
 def draw_snake_tail(
     surf: pygame.Surface,
@@ -213,6 +267,32 @@ def draw_snake_tail(
             [tip_inner, (int(tx + px * 3), int(ty + py * 3)), (int(tx - px * 3), int(ty - py * 3))],
         )
 
+    elif tail == "fin":
+        tip = (int(tx + ux * 18), int(ty + uy * 18))
+        left = (int(tx + px * 8), int(ty + py * 8))
+        right = (int(tx - px * 8), int(ty - py * 8))
+        pygame.draw.polygon(surf, (76, 188, 220), [tip, left, right])
+        pygame.draw.polygon(surf, (44, 114, 152), [tip, left, right], 1)
+        mid = ((left[0] + right[0]) // 2, (left[1] + right[1]) // 2)
+        pygame.draw.line(surf, (162, 226, 246), mid, tip, 1)
+
+    elif tail == "club":
+        stem_end = (int(tx + ux * 10), int(ty + uy * 10))
+        pygame.draw.line(surf, (118, 90, 58), (tx, ty), stem_end, 4)
+        head = (int(tx + ux * 20), int(ty + uy * 20))
+        pygame.draw.circle(surf, (134, 104, 68), head, 7)
+        pygame.draw.circle(surf, (90, 66, 42), head, 7, 1)
+        for off_x, off_y in ((-4, -1), (3, -2), (0, 4)):
+            pygame.draw.circle(surf, (168, 136, 94), (head[0] + off_x, head[1] + off_y), 2)
+
+    elif tail == "leaf":
+        tip = (int(tx + ux * 20), int(ty + uy * 20))
+        left = (int(tx + px * 7 + ux * 5), int(ty + py * 7 + uy * 5))
+        right = (int(tx - px * 7 + ux * 5), int(ty - py * 7 + uy * 5))
+        pygame.draw.polygon(surf, (72, 170, 84), [tip, left, (tx, ty), right])
+        pygame.draw.polygon(surf, (34, 104, 48), [tip, left, (tx, ty), right], 1)
+        pygame.draw.line(surf, (146, 226, 140), (tx, ty), tip, 1)
+
 
 def draw_snake_eyes(
     surf: pygame.Surface,
@@ -235,6 +315,18 @@ def draw_snake_eyes(
         inner = slit.inflate(-4, -max(1, slit_h // 3))
         pygame.draw.rect(surf, (60, 190, 240), inner, border_radius=1)
         return
+    if style == "cyber":
+        lens_w = max(4, int(r * 0.7))
+        lens_h = max(3, int(r * 0.42))
+        for sign in (-1, 1):
+            ex = int(cx + px * sign * (r * 0.62) + ddx * r * 0.32)
+            ey = int(cy + py * sign * (r * 0.42) + ddy * r * 0.32)
+            lens = pygame.Rect(ex - lens_w // 2, ey - lens_h // 2, lens_w, lens_h)
+            pygame.draw.rect(surf, (18, 22, 30), lens, border_radius=2)
+            inner = lens.inflate(-2, -2)
+            pygame.draw.rect(surf, (88, 248, 230), inner, border_radius=2)
+            pygame.draw.line(surf, (210, 255, 248), (inner.x + 1, ey), (inner.right - 2, ey), 1)
+        return
 
     for sign in (-1, 1):
         ex = int(cx + px * sign * (r * 0.5) + ddx * r * 0.38)
@@ -252,11 +344,34 @@ def draw_snake_eyes(
             r_g = min(255, body_clr[0] + 90)
             g_g = min(255, body_clr[1] + 90)
             b_g = min(255, body_clr[2] + 90)
-            gs = pygame.Surface(((outer_r + 3) * 2, (outer_r + 3) * 2), pygame.SRCALPHA)
-            pygame.draw.circle(gs, (r_g, g_g, b_g, 130), (outer_r + 3, outer_r + 3), outer_r + 2)
+            eye_sz = (outer_r + 3) * 2
+            gs = _get_glow_surf(eye_sz, (r_g, g_g, b_g, 130))
             surf.blit(gs, (ex - outer_r - 3, ey - outer_r - 3))
             pygame.draw.circle(surf, (r_g, g_g, b_g), (ex, ey), outer_r)
             pygame.draw.circle(surf, (250, 255, 250), (ex, ey), inner_r)
+
+        elif style == "sleepy":
+            pygame.draw.circle(surf, (236, 242, 246), (ex, ey), outer_r)
+            pygame.draw.circle(surf, (24, 28, 36), (ex, ey + 1), inner_r)
+            lid = pygame.Rect(ex - outer_r - 1, ey - outer_r - 2, outer_r * 2 + 2, max(2, outer_r))
+            pygame.draw.ellipse(surf, _darken(body_clr, 0.70), lid)
+            pygame.draw.arc(
+                surf,
+                _lighten(body_clr, 28),
+                pygame.Rect(ex - outer_r - 1, ey - outer_r - 2, outer_r * 2 + 2, outer_r * 2),
+                math.pi,
+                2 * math.pi,
+                1,
+            )
+
+        elif style == "star":
+            gold = (252, 220, 94)
+            pygame.draw.circle(surf, (38, 24, 12), (ex, ey), outer_r + 1)
+            pygame.draw.circle(surf, gold, (ex, ey), outer_r)
+            spike = outer_r + 2
+            pygame.draw.line(surf, (255, 244, 172), (ex - spike, ey), (ex + spike, ey), 1)
+            pygame.draw.line(surf, (255, 244, 172), (ex, ey - spike), (ex, ey + spike), 1)
+            pygame.draw.circle(surf, (98, 62, 16), (ex, ey), max(1, outer_r // 3))
 
         else:  # normal
             pygame.draw.circle(surf, (240, 248, 255), (ex, ey), outer_r)
@@ -334,12 +449,10 @@ def draw_segmented_snake(
 
         if i == 0:
             # ── Head ──────────────────────────────────────────────────────────
-            # Glow halo
+            # Glow halo (cached surface — no per-frame allocation)
             glow_sz = r * 4 + 12
-            gs = pygame.Surface((glow_sz, glow_sz), pygame.SRCALPHA)
-            gc = glow_sz // 2
-            pygame.draw.circle(gs, glow_clr, (gc, gc), r + 9)
-            surf.blit(gs, (cx - gc, cy - gc))
+            gs = _get_glow_surf(glow_sz, glow_clr)
+            surf.blit(gs, (cx - glow_sz // 2, cy - glow_sz // 2))
             # 3-layer head circles
             pygame.draw.circle(surf, dark1, (cx, cy), r + 3)
             pygame.draw.circle(surf, dark2, (cx, cy), r + 1)

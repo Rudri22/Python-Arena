@@ -1,0 +1,8 @@
+{
+  "direction_bindings": {
+    "up": "up",
+    "left": "left",
+    "down": "down",
+    "right": "right"
+  }
+}

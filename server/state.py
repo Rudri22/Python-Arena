@@ -637,21 +637,9 @@ class ServerState:
             # Sprint 5 PBI 5.1: movement is queued here, while simulation
             # stepping is handled by the continuous server game loop.
 
-            state_dict = to_protocol_state(runtime)
-            game_over_payload: dict[str, Any] | None = None
-            if runtime.status == "finished":
-                final_scores = {
-                    username: runtime.snakes[username].health
-                    for username in runtime.players
-                }
-                game_over_payload = {
-                    "game_id": game_id,
-                    "winner": runtime.winner or "draw",
-                    "final_scores": final_scores,
-                    "reason": runtime.end_reason,
-                }
-
-            return True, "updated", game_id, state_dict, game_over_payload
+            # State and end-of-match broadcasts are produced by the dedicated
+            # server game loop. Movement handling only needs to enqueue input.
+            return True, "updated", game_id, None, None
 
     def step_active_matches(self) -> list[dict[str, Any]]:
         """
@@ -865,30 +853,33 @@ class ServerState:
                     return False, "occupied"
 
             kind_key = str(kind).strip().lower()
-            if kind_key == "orange":
+            if kind_key in {"yellow", "orange"}:
                 metadata: dict[str, object] = {
-                    "kind": "orange",
+                    "kind": "yellow",
                     "effect": "opponent_damage",
-                    "amount": 20,
-                    "points": -20,
+                    "amount": 40,
+                    "points": -40,
                 }
             elif kind_key == "red":
                 metadata = {
                     "kind": "red",
                     "effect": "self_damage",
-                    "amount": 20,
-                    "points": -20,
+                    "amount": 40,
+                    "points": -40,
                 }
             else:
                 metadata = {
                     "kind": "green",
                     "effect": "self_heal",
-                    "amount": 15,
-                    "points": 15,
+                    "amount": 30,
+                    "points": 30,
                 }
 
             runtime.pies[cell] = metadata
             runtime.pie_counter += 1
+            # Clear the active throw target once a pie lands there.
+            if runtime.throw_target is not None and (runtime.throw_target["x"], runtime.throw_target["y"]) == cell:
+                runtime.throw_target = None
             return True, "spawned"
 
     def get_idle_users(self) -> list[str]:

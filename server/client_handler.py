@@ -255,32 +255,20 @@ def _handle_invitation_message(
         return
 
     if action == "spawn_pie":
-        # Client serpent-blob pie landing request.
-        if from_user.casefold() != sender_username.casefold():
-            send_message(client_socket, make_error_message("Pie spawn sender mismatch."))
-            return
-
         req_game_id = str(payload.get("game_id", "")).strip() or None
         try:
             x = int(payload.get("x"))
             y = int(payload.get("y"))
         except (TypeError, ValueError):
-            send_message(client_socket, make_error_message("Pie spawn failed: invalid coordinates."))
             return
         kind = str(payload.get("kind", "green")).strip().lower()
-
-        ok, reason = server_state.spawn_blob_pie(
+        server_state.spawn_blob_pie(
             actor=sender_username,
             game_id=req_game_id,
             x=x,
             y=y,
             kind=kind,
         )
-        if not ok:
-            # Keep this silent for expected races/occupancy during visuals.
-            if reason not in {"occupied", "out_of_bounds"}:
-                send_message(client_socket, make_error_message(f"Pie spawn failed: {reason}."))
-            return
         return
 
     if action == "send":
@@ -475,7 +463,7 @@ def _handle_movement_message(
         )
         return
 
-    success, reason, game_id, state_dict, game_over_payload = server_state.process_player_movement(
+    success, reason, game_id, _state_dict, _game_over_payload = server_state.process_player_movement(
         player=player,
         direction=direction,
     )
@@ -499,43 +487,12 @@ def _handle_movement_message(
         send_message(client_socket, make_error_message(reason_to_message.get(reason, "Movement rejected.")))
         return
 
-    if game_id is None or state_dict is None:
+    if game_id is None:
         send_message(client_socket, make_error_message("Internal state update failed."))
         return
-
-    # Sprint 4 PBI 4.12: broadcast updated state to active players only.
-    sockets = server_state.get_match_session_sockets(game_id)
-    if not sockets:
-        send_message(client_socket, make_error_message("Unable to resolve active match session recipients."))
-        return
-
-    # PBI 4.12 + PBI 3.12: broadcast packaged authoritative game state each update.
-    game_state_message = make_game_state_message(game_id=game_id, state=state_dict)
-    for sock in sockets:
-        try:
-            send_message(sock, game_state_message)
-        except OSError:
-            continue
-
-    # PBI 3.10/3.11: send explicit end-of-game summary when match is finished.
-    if game_over_payload is not None:
-        print(
-            f"[GAME_OVER][game={game_over_payload['game_id']}] "
-            f"winner={game_over_payload['winner']} reason={game_over_payload.get('reason')}"
-        )
-        game_over_message = make_game_over_message(
-            game_id=game_over_payload["game_id"],
-            winner=game_over_payload["winner"],
-            final_scores=game_over_payload.get("final_scores"),
-            reason=game_over_payload.get("reason"),
-        )
-        for sock in sockets:
-            try:
-                send_message(sock, game_over_message)
-            except OSError:
-                continue
-        # Match teardown moves users back to idle; refresh lobby metadata.
-        broadcast_online_users(server_state)
+    # Authoritative game-state and game-over broadcasts are emitted by the
+    # continuous server loop (`server/server.py::_run_game_loop`). Sending
+    # duplicates here can build client-side backlogs and cause visible lag.
 
 
 def _handle_chat_message(

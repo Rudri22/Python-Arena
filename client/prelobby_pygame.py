@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import math
 import queue
 import random
@@ -19,14 +20,12 @@ from client.snake_skins import (
     draw_segmented_snake,
     draw_snake_eyes,
     draw_snake_hat,
-    draw_snake_pattern,
     draw_snake_tail,
 )
 from shared.protocol import (
     EYE_STYLES,
     HATS,
     MessageType,
-    PATTERNS,
     SKIN_COLORS,
     SnakeSkin,
     TAILS,
@@ -44,6 +43,31 @@ from client.controls_config import (
     normalize_key_name,
     save_direction_bindings,
 )
+
+_SKIN_PREFS_PATH = Path(__file__).resolve().parent / "assets" / "skin_prefs.json"
+
+
+def _load_skin_prefs() -> SnakeSkin:
+    try:
+        if _SKIN_PREFS_PATH.exists():
+            data = json.loads(_SKIN_PREFS_PATH.read_text(encoding="utf-8"))
+            from shared.protocol import sanitize_skin
+            skin = sanitize_skin(data)
+            # Texture customization is intentionally disabled in UI.
+            return dataclass_replace(skin, pattern="solid")
+    except Exception:
+        pass
+    return SnakeSkin()
+
+
+def _save_skin_prefs(skin: SnakeSkin) -> None:
+    try:
+        from shared.protocol import skin_to_dict
+        _SKIN_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SKIN_PREFS_PATH.write_text(json.dumps(skin_to_dict(skin), indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 """
 Python-Arena Prelobby + Lobby (single-file feature map)
@@ -1467,10 +1491,11 @@ class PygameLobbyScene:
         self.change_skin_icon = self._load_asset_icon("change_skin_snake.png")
         # Quick-cycle palette keys for the prev/next dots on the left panel.
         self.skin_color_keys: list[str] = list(SKIN_COLORS.keys())
-        self.current_skin: SnakeSkin = SnakeSkin()
+        self.current_skin: SnakeSkin = _load_skin_prefs()
         self.pending_skin: SnakeSkin = SnakeSkin()
         self.skin_modal_open: bool = False
         self.skin_modal_tab: str = "color"
+        self._preview_cache: tuple[SnakeSkin | None, pygame.Surface | None] = (None, None)
         self.match_skins: dict[str, dict[str, str]] = {}
 
         self.connection: ClientConnection | None = None
@@ -2842,14 +2867,15 @@ class PygameLobbyScene:
         self._set_skin_color(keys[(idx + step) % len(keys)])
 
     def _open_skin_modal(self) -> None:
-        self.pending_skin = dataclass_replace(self.current_skin)
+        self.pending_skin = dataclass_replace(self.current_skin, pattern="solid")
         self.skin_modal_tab = "color"
         self.skin_modal_open = True
 
     def _close_skin_modal(self, commit: bool) -> None:
         if commit:
-            self.current_skin = dataclass_replace(self.pending_skin)
+            self.current_skin = dataclass_replace(self.pending_skin, pattern="solid")
             self._send_skin_update()
+            _save_skin_prefs(self.current_skin)
         self.skin_modal_open = False
 
     def _skin_modal_rect(self) -> pygame.Rect:
@@ -2858,19 +2884,17 @@ class PygameLobbyScene:
 
     def _skin_modal_tab_rect(self, idx: int) -> pygame.Rect:
         modal = self._skin_modal_rect()
-        tab_w = (modal.width - 40) // 5
+        tab_w = (modal.width - 40) // max(1, len(self._skin_modal_tabs()))
         x = modal.x + 20 + idx * tab_w
         return pygame.Rect(x, modal.y + 52, tab_w - 6, 30)
 
     def _skin_modal_tabs(self) -> list[str]:
-        return ["color", "pattern", "hat", "tail", "eyes"]
+        return ["color", "hat", "tail", "eyes"]
 
     def _skin_modal_active_options(self) -> list[str]:
         tab = self.skin_modal_tab
         if tab == "color":
             return list(SKIN_COLORS.keys())
-        if tab == "pattern":
-            return list(PATTERNS)
         if tab == "hat":
             return list(HATS)
         if tab == "tail":
@@ -2886,9 +2910,10 @@ class PygameLobbyScene:
         grid_w = modal.width * 60 // 100 - 20
         grid_h = modal.height - 96 - 60
         cols = 3 if self.skin_modal_tab == "color" else 2
-        rows_needed = 4 if self.skin_modal_tab == "color" else 3
+        option_count = max(1, len(self._skin_modal_active_options()))
+        rows_needed = max(1, math.ceil(option_count / cols))
         cell_w = grid_w // cols
-        cell_h = min(74, grid_h // rows_needed)
+        cell_h = max(52, min(74, grid_h // rows_needed))
         col = idx % cols
         row = idx // cols
         return pygame.Rect(grid_x + col * cell_w, grid_y + row * cell_h, cell_w - 8, cell_h - 8)
@@ -2918,11 +2943,10 @@ class PygameLobbyScene:
         for idx, key in enumerate(self._skin_modal_active_options()):
             if self._skin_modal_option_rect(idx).collidepoint(pos):
                 field = self.skin_modal_tab
-                field_key = "eyes" if field == "eyes" else field
-                self.pending_skin = dataclass_replace(self.pending_skin, **{field_key: key})
+                self.pending_skin = dataclass_replace(self.pending_skin, **{field: key})
                 return
         if self._skin_modal_reset_rect().collidepoint(pos):
-            self.pending_skin = SnakeSkin()
+            self.pending_skin = SnakeSkin(pattern="solid")
             return
         if self._skin_modal_close_rect().collidepoint(pos):
             self._close_skin_modal(commit=True)
@@ -2930,25 +2954,31 @@ class PygameLobbyScene:
 
     # Skin preview: draws a small S-curve snake with the skin applied.
     def _draw_skin_preview(self, surf: pygame.Surface, rect: pygame.Rect, skin: SnakeSkin) -> None:
+        # Only re-render the snake when the skin actually changed (perf cache)
+        cached_skin, cached_surf = self._preview_cache
+        if cached_skin != skin or cached_surf is None or cached_surf.get_size() != (rect.width, rect.height):
+            preview = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            preview.fill((12, 20, 32))
+            pygame.draw.rect(preview, (60, 200, 148), preview.get_rect(), 2, border_radius=10)
+            r = max(8, min(14, rect.height // 8))
+            n = 9
+            spread = rect.width - r * 4
+            step = spread // max(1, n - 1)
+            amp = min(int(rect.height * 0.28), 36)
+            cx0 = r * 2
+            cy0 = rect.height // 2 + 8
+            centers: list[tuple[float, float]] = [
+                (cx0 + i * step, cy0 + amp * math.sin(i * 1.0))
+                for i in range(n)
+            ]
+            draw_segmented_snake(preview, centers, skin, r)
+            label = self.font_tiny.render("PREVIEW", True, (148, 198, 228))
+            preview.blit(label, (10, 8))
+            self._preview_cache = (dataclass_replace(skin), preview)
+            cached_surf = preview
+
         pygame.draw.rect(surf, (12, 20, 32), rect, border_radius=10)
-        pygame.draw.rect(surf, (60, 200, 148), rect, 2, border_radius=10)
-
-        # Build a natural S-curve of segments sized to fill the preview rect
-        r = max(8, min(14, rect.height // 8))
-        n = 9
-        spread = rect.width - r * 4
-        step = spread // max(1, n - 1)
-        amp = min(int(rect.height * 0.28), 36)
-        cx0 = rect.x + r * 2
-        cy0 = rect.centery + 8
-        centers: list[tuple[float, float]] = [
-            (cx0 + i * step, cy0 + amp * math.sin(i * 1.0))
-            for i in range(n)
-        ]
-        draw_segmented_snake(surf, centers, skin, r)
-
-        label = self.font_tiny.render("PREVIEW", True, (148, 198, 228))
-        surf.blit(label, (rect.x + 10, rect.y + 8))
+        surf.blit(cached_surf, rect.topleft)
 
     def _draw_skin_modal(self, surf: pygame.Surface) -> None:
         overlay = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
@@ -2996,11 +3026,6 @@ class PygameLobbyScene:
             rgb = SKIN_COLORS[key]
             pygame.draw.circle(surf, rgb, (cx, cy), 18)
             pygame.draw.circle(surf, (18, 22, 30), (cx, cy), 18, 1)
-        elif tab == "pattern":
-            body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
-            pygame.draw.circle(surf, body_clr, (cx, cy), 18)
-            if key != "solid":
-                draw_snake_pattern(surf, cx, cy, 18, 1, key, body_clr)
         elif tab == "hat":
             body_clr = SKIN_COLORS.get(self.pending_skin.color, SKIN_COLORS["venom"])
             pygame.draw.circle(surf, body_clr, (cx, cy + 4), 14)

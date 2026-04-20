@@ -10,6 +10,7 @@ This version intentionally focuses on environment art only:
 from __future__ import annotations
 
 import math
+import os
 import random
 from collections import deque
 from pathlib import Path
@@ -41,6 +42,10 @@ WINDOW_WIDTH = 1220
 WINDOW_HEIGHT = 780
 WINDOW_TITLE = "Python-Arena - Arena Rebuild"
 TARGET_FPS = 60
+LOW_QUALITY_FPS_THRESHOLD = 24.0
+LOW_QUALITY_RECOVER_FPS_THRESHOLD = 48.0
+PERF_CHECK_INTERVAL_MS = 2000
+MIN_FPS_SAMPLES_FOR_SWITCH = 12
 
 SKY_BG_COLOR = (94, 98, 108)
 GRID_COLS = 20
@@ -65,9 +70,9 @@ GAP_COL_START = SIDE_EXTENSION_TILES                      # col 5
 GAP_COL_END   = GRID_COLS - SIDE_EXTENSION_TILES          # col 15
 GAP_ROW_END   = int(SIDE_EXTENSION_ROWS * TILE_SIZE / GAME_CELL_H) + 1  # ≈ row 7
 BASE_SNAKE_LENGTH = 3
-LOCAL_INITIAL_HEALTH = 1_000_000
-HEALTH_PER_GROWTH_SEGMENT = 10
-PIE_HEALTH_GAIN = 15
+LOCAL_INITIAL_HEALTH = 1_000
+PIE_HEALTH_GAIN = 30
+PIE_DAMAGE = 40
 OBSTACLE_COLLISION_DAMAGE = 20
 SNAKE_COLLISION_DAMAGE = 20
 MOVE_INTERVAL_MS = 120
@@ -77,10 +82,6 @@ STATIC_OBSTACLES_GAME: tuple[tuple[int, int], ...] = (
     (9, 7), (10, 7), (9, 12), (10, 12), (5, 10), (14, 10),
 )
 BERRY_COLOR  = (200, 255, 100)
-# Serpent-blob pie spawn mix (green is most common).
-PIE_GREEN_CHANCE = 0.62
-PIE_ORANGE_CHANCE = 0.24
-# Remaining probability goes to red.
 # HUD palette
 HUD_BG       = (12, 16, 24)
 HUD_TEXT     = (230, 240, 248)
@@ -242,13 +243,16 @@ class PygameArenaWindow:
         ]
 
         # Big serpent throwing state machine.
-        # IDLE -> WIND_UP -> THROW (blob spawns) -> RECOVER -> IDLE, every ~5s.
         now_ms = pygame.time.get_ticks()
         self._throw_state = "idle"
         self._throw_state_start = now_ms
-        self._next_throw_time = now_ms + 2500  # first throw 2.5s after start
+        self._next_throw_time = now_ms + 2500  # first cosmetic throw 2.5s after start
         self._throw_blob_spawned = False
         self._poison_blobs: list[dict] = []
+        # Server-provided throw target: pixel coords for aiming, raw data for spawn_pie.
+        self._server_throw_target: tuple[float, float] | None = None
+        self._server_throw_data: dict | None = None  # {x, y, kind, id}
+        self._last_throw_target_id: int | None = None
 
         # Big serpent agent — navigates the gap above the arena.
         _ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
@@ -268,6 +272,14 @@ class PygameArenaWindow:
         # Frame timing for delta-time-based motion (snakes, blobs).
         self._last_tick_ms = now_ms
         self._step_dt = 1.0 / TARGET_FPS
+        # Runtime performance adaptation for lower-end laptops.
+        self._force_low_quality = str(os.getenv("PYTHON_ARENA_LOW_QUALITY", "")).strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        self.low_quality_mode = self._force_low_quality
+        self._fps_samples: deque[float] = deque(maxlen=48)
+        self._last_perf_check_ms = now_ms
+        self._tiled_lava_cache: dict[int, pygame.Surface] = {}
 
         # ── Gameplay networking ────────────────────────────────────────
         self.connection: ClientConnection | None = None
@@ -700,6 +712,7 @@ class PygameArenaWindow:
             self._draw_frame()
             pygame.display.flip()
             self.clock.tick(TARGET_FPS)
+            self._update_runtime_quality()
 
         self._disconnect_from_server()
         if self.return_to_lobby_requested and self.return_to_tk_lobby:
@@ -710,6 +723,48 @@ class PygameArenaWindow:
         else:
             pygame.quit()
         return self.return_to_lobby_requested
+
+    def _update_runtime_quality(self) -> None:
+        """Auto-toggle low-quality rendering when FPS drops on weaker devices."""
+
+        if self._force_low_quality:
+            return
+        fps = self.clock.get_fps()
+        if fps >= 1.0:
+            self._fps_samples.append(float(fps))
+
+        now = pygame.time.get_ticks()
+        if now - self._last_perf_check_ms < PERF_CHECK_INTERVAL_MS:
+            return
+        self._last_perf_check_ms = now
+
+        if len(self._fps_samples) < MIN_FPS_SAMPLES_FOR_SWITCH:
+            return
+        avg_fps = sum(self._fps_samples) / len(self._fps_samples)
+
+        if not self.low_quality_mode and avg_fps < LOW_QUALITY_FPS_THRESHOLD:
+            self.low_quality_mode = True
+            self.chat_messages.append("[SYSTEM] Performance mode enabled for smoother gameplay.")
+            return
+        if self.low_quality_mode and avg_fps > LOW_QUALITY_RECOVER_FPS_THRESHOLD:
+            self.low_quality_mode = False
+            self.chat_messages.append("[SYSTEM] Performance mode disabled.")
+
+    def _get_tiled_lava_layer(self, frame_index: int) -> pygame.Surface:
+        """Build/cache full-screen tiled lava for a specific animation frame."""
+
+        cached = self._tiled_lava_cache.get(frame_index)
+        if cached is not None:
+            return cached
+
+        frame = self.lava_frames[frame_index]
+        tile = TILE_SIZE
+        layer = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT)).convert()
+        for y in range(0, WINDOW_HEIGHT, tile):
+            for x in range(0, WINDOW_WIDTH, tile):
+                layer.blit(frame, (x, y))
+        self._tiled_lava_cache[frame_index] = layer
+        return layer
 
     def _handle_events(self) -> None:
         for event in pygame.event.get():
@@ -850,16 +905,14 @@ class PygameArenaWindow:
         if not self.lava_frames:
             return
 
-        frame = self.lava_frames[(pygame.time.get_ticks() // 120) % len(self.lava_frames)]
-        tile = TILE_SIZE
-
-        for y in range(0, self.screen.get_height(), tile):
-            for x in range(0, self.screen.get_width(), tile):
-                self.screen.blit(frame, (x, y))
+        frame_index = (pygame.time.get_ticks() // 120) % len(self.lava_frames)
+        self.screen.blit(self._get_tiled_lava_layer(frame_index), (0, 0))
 
     def _draw_lava_rocks(self) -> None:
         """Draw animated poison rocks in lava zones, excluding grid vicinity."""
 
+        if self.low_quality_mode:
+            return
         if not self.lava_rock_frames:
             return
         frame = self.lava_rock_frames[(pygame.time.get_ticks() // 110) % len(self.lava_rock_frames)]
@@ -937,7 +990,8 @@ class PygameArenaWindow:
         elapsed = ticks - self._throw_state_start
 
         if state == "idle":
-            if ticks >= self._next_throw_time:
+            # Throw when the server queues an event OR when the local timer fires.
+            if self._server_throw_target is not None or ticks >= self._next_throw_time:
                 self._throw_state = "wind_up"
                 self._throw_state_start = ticks
                 self._throw_blob_spawned = False
@@ -972,11 +1026,19 @@ class PygameArenaWindow:
         """Spawn a poison blob projectile thrown from the serpent's head."""
 
         hx, hy = head_pos
-        # Aim at a random arena tile (avoid the very edges).
-        target_col = random.uniform(2.0, GRID_COLS - 3.0)
-        target_row = random.uniform(1.5, GRID_ROWS - 1.5)
-        target_x = self.arena_x + target_col * TILE_SIZE
-        target_y = self.arena_y + target_row * TILE_SIZE
+        if self._server_throw_target is not None:
+            target_x, target_y = self._server_throw_target
+            self._server_throw_target = None
+        else:
+            # Cosmetic throw: no server target queued (pre-match or outside a match).
+            target_col = random.uniform(2.0, GRID_COLS - 3.0)
+            target_row = random.uniform(1.5, GRID_ROWS - 1.5)
+            target_x = self.arena_x + target_col * TILE_SIZE
+            target_y = self.arena_y + target_row * TILE_SIZE
+
+        # Capture throw data so the blob can send spawn_pie on landing.
+        throw_data = self._server_throw_data
+        self._server_throw_data = None
 
         # Compute initial velocity for a parabolic arc to that target.
         flight_time = random.uniform(0.95, 1.25)
@@ -1000,6 +1062,7 @@ class PygameArenaWindow:
             "splat_at": 0,
             "splat_x": 0.0,
             "splat_y": 0.0,
+            "throw_data": throw_data,  # server target info; None for cosmetic throws
         })
 
     # ---- big serpent rendering ---------------------------------------
@@ -1067,6 +1130,20 @@ class PygameArenaWindow:
         self._update_throw_state(ticks)
         state = self._throw_state
         sp = self._throw_progress(ticks)
+        # Keep serpent and throw timing active in all quality modes so gameplay
+        # events (blob landings/pie spawns) stay deterministic.
+        self._update_serpent_agent(self._step_dt)
+
+        if self.low_quality_mode:
+            head_x = float(self._serpent_agent["x"])
+            head_y = float(self._serpent_agent["y"])
+            head_angle = float(self._serpent_agent["angle"])
+            dir_x = math.cos(head_angle)
+            dir_y = math.sin(head_angle)
+            if state == "throw" and not self._throw_blob_spawned and sp >= 0.42:
+                self._spawn_blob_from_head((head_x, head_y), (dir_x, dir_y))
+                self._throw_blob_spawned = True
+            return
 
         # Compute head_y_offset (positive = head goes DOWN, negative = UP)
         # and forward_extend (positive = head reaches further along its trail).
@@ -1091,8 +1168,7 @@ class PygameArenaWindow:
         gap_y = self.arena_y - ext_h + 16
         gap_h = ext_h - 30
 
-        # Move the serpent agent and sample body positions via arc-length.
-        self._update_serpent_agent(self._step_dt)
+        # Sample body positions via arc-length.
         num_seg = 45
         raw_pts = self._sample_arc_positions(self._serpent_agent["history"], num_seg, 14.0)
         # Reverse so index 0 = tail and index -1 = head — matches original draw order.
@@ -1281,6 +1357,7 @@ class PygameArenaWindow:
         ticks = pygame.time.get_ticks()
         dt = self._step_dt
         gravity = 780.0
+        minimal = self.low_quality_mode
 
         survivors: list[dict] = []
         for blob in self._poison_blobs:
@@ -1288,7 +1365,13 @@ class PygameArenaWindow:
                 # Splat fades out over ~450 ms.
                 age = ticks - blob["splat_at"]
                 if age < 450:
-                    self._draw_splat(blob, age)
+                    if minimal:
+                        sx = int(blob["splat_x"])
+                        sy = int(blob["splat_y"])
+                        splat_r = int(10 + 14 * (age / 450.0))
+                        pygame.draw.circle(self.screen, (70, 190, 55), (sx, sy), max(2, splat_r), 1)
+                    else:
+                        self._draw_splat(blob, age)
                     survivors.append(blob)
                 continue
 
@@ -1302,18 +1385,11 @@ class PygameArenaWindow:
                 blob["splat_at"] = ticks
                 blob["splat_x"] = blob["x"]
                 blob["splat_y"] = blob["target_y"]
-                # Spawn pie through server so it is synchronized across clients.
-                gcol = int((blob["x"] - self.game_origin_x) / GAME_CELL_W)
-                grow = int((blob["target_y"] - self.game_origin_y) / GAME_CELL_H)
-                if not self._is_out_of_bounds(gcol, grow):
-                    roll = random.random()
-                    if roll < PIE_GREEN_CHANCE:
-                        pie_kind = "green"
-                    elif roll < PIE_GREEN_CHANCE + PIE_ORANGE_CHANCE:
-                        pie_kind = "orange"
-                    else:
-                        pie_kind = "red"
-                    self._send_blob_pie_spawn(cell_x=gcol, cell_y=grow, kind=pie_kind)
+                td = blob.get("throw_data")
+                if td:
+                    self._send_blob_pie_spawn(
+                        cell_x=td["x"], cell_y=td["y"], kind=td["kind"]
+                    )
                 survivors.append(blob)
                 continue
             if blob["x"] < -60 or blob["x"] > WINDOW_WIDTH + 60 or blob["y"] > WINDOW_HEIGHT + 60:
@@ -1323,30 +1399,34 @@ class PygameArenaWindow:
             wob = math.sin(ticks / 80.0 + blob["wobble"])
             r = 11 + int(2 * wob)
 
-            # Trailing droplets (drawn behind the blob).
-            for ti in range(3):
-                trail_dt = -0.045 * (ti + 1)
-                tx_ = blob["x"] + blob["vx"] * trail_dt
-                ty_ = blob["y"] + blob["vy"] * trail_dt - 0.5 * gravity * trail_dt * trail_dt
-                tr = max(2, r - 3 - ti * 2)
-                ta = 170 - ti * 50
-                ts = pygame.Surface((tr * 4 + 2, tr * 4 + 2), pygame.SRCALPHA)
-                tc = tr * 2 + 1
-                pygame.draw.circle(ts, (60, 200, 40, ta), (tc, tc), tr)
-                self.screen.blit(ts, (int(tx_) - tc, int(ty_) - tc))
+            if minimal:
+                pygame.draw.circle(self.screen, (24, 92, 18), (bx, by), r + 1)
+                pygame.draw.circle(self.screen, (75, 205, 55), (bx, by), max(3, r - 2))
+            else:
+                # Trailing droplets (drawn behind the blob).
+                for ti in range(3):
+                    trail_dt = -0.045 * (ti + 1)
+                    tx_ = blob["x"] + blob["vx"] * trail_dt
+                    ty_ = blob["y"] + blob["vy"] * trail_dt - 0.5 * gravity * trail_dt * trail_dt
+                    tr = max(2, r - 3 - ti * 2)
+                    ta = 170 - ti * 50
+                    ts = pygame.Surface((tr * 4 + 2, tr * 4 + 2), pygame.SRCALPHA)
+                    tc = tr * 2 + 1
+                    pygame.draw.circle(ts, (60, 200, 40, ta), (tc, tc), tr)
+                    self.screen.blit(ts, (int(tx_) - tc, int(ty_) - tc))
 
-            # Outer glow.
-            gs = pygame.Surface((r * 4 + 8, r * 4 + 8), pygame.SRCALPHA)
-            gc = r * 2 + 4
-            pygame.draw.circle(gs, (60, 220, 40, 70),  (gc, gc), r + 7)
-            pygame.draw.circle(gs, (90, 255, 60, 110), (gc, gc), r + 3)
-            self.screen.blit(gs, (bx - gc, by - gc))
+                # Outer glow.
+                gs = pygame.Surface((r * 4 + 8, r * 4 + 8), pygame.SRCALPHA)
+                gc = r * 2 + 4
+                pygame.draw.circle(gs, (60, 220, 40, 70),  (gc, gc), r + 7)
+                pygame.draw.circle(gs, (90, 255, 60, 110), (gc, gc), r + 3)
+                self.screen.blit(gs, (bx - gc, by - gc))
 
-            # Body layers.
-            pygame.draw.circle(self.screen, (16, 58, 10),    (bx, by),         r + 2)
-            pygame.draw.circle(self.screen, (40, 138, 28),   (bx, by),         r)
-            pygame.draw.circle(self.screen, (110, 220, 70),  (bx - 2, by - 2), max(2, r - 4))
-            pygame.draw.circle(self.screen, (220, 255, 200), (bx - 3, by - 3), max(1, r - 8))
+                # Body layers.
+                pygame.draw.circle(self.screen, (16, 58, 10),    (bx, by),         r + 2)
+                pygame.draw.circle(self.screen, (40, 138, 28),   (bx, by),         r)
+                pygame.draw.circle(self.screen, (110, 220, 70),  (bx - 2, by - 2), max(2, r - 4))
+                pygame.draw.circle(self.screen, (220, 255, 200), (bx - 3, by - 3), max(1, r - 8))
 
             survivors.append(blob)
 
@@ -1375,6 +1455,16 @@ class PygameArenaWindow:
         game_obstacles uses the server's 20×20 grid, so the art sits exactly
         where collision is checked — snakes cannot visually walk through them.
         """
+
+        if self.low_quality_mode:
+            radius = max(4, int(GAME_CELL_H * 0.28))
+            for gcol, grow in self.game_obstacles:
+                px, py = self._game_to_pixel(gcol, grow)
+                cx = int(px)
+                cy = int(py)
+                pygame.draw.circle(self.screen, (30, 40, 30), (cx, cy), radius + 2)
+                pygame.draw.circle(self.screen, (150, 70, 55), (cx, cy), radius)
+            return
 
         ticks = pygame.time.get_ticks()
 
@@ -1559,6 +1649,9 @@ class PygameArenaWindow:
         head via a position-history deque, giving completely natural trailing
         motion regardless of how the head turns.
         """
+
+        if self.low_quality_mode:
+            return
 
         ticks = pygame.time.get_ticks()
         dt = self._step_dt
@@ -1871,12 +1964,23 @@ class PygameArenaWindow:
             self.incoming_queue.put(msg)
 
     def _drain_incoming_queue(self) -> None:
+        latest_game_state: dict | None = None
         while True:
             try:
                 msg = self.incoming_queue.get_nowait()
             except queue.Empty:
                 break
+            if msg.get("type") == MessageType.GAME_STATE.value:
+                # Keep only the newest authoritative state per frame. This avoids
+                # visual/network backlog that can look like collision lag.
+                latest_game_state = msg
+                continue
+            if latest_game_state is not None:
+                self._handle_server_message(latest_game_state)
+                latest_game_state = None
             self._handle_server_message(msg)
+        if latest_game_state is not None:
+            self._handle_server_message(latest_game_state)
 
     def _handle_server_message(self, message: dict) -> None:
         msg_type = message.get("type")
@@ -2086,7 +2190,7 @@ class PygameArenaWindow:
     def _send_blob_pie_spawn(self, *, cell_x: int, cell_y: int, kind: str) -> None:
         if self.connection is None or self.active_game_id is None:
             return
-        if self.spectator_mode or not self._is_primary_match_client():
+        if self.spectator_mode:
             return
         msg = make_invitation_message(
             from_user=self.username,
@@ -2170,7 +2274,7 @@ class PygameArenaWindow:
             if self._is_out_of_bounds(px, py):
                 continue
             kind = str(p.get("kind", "green")).strip().lower()
-            if kind not in {"green", "orange", "red"}:
+            if kind not in {"green", "yellow", "red"}:
                 kind = "green"
             parsed_pies[(px, py)] = kind
         self.game_pies = parsed_pies
@@ -2191,6 +2295,24 @@ class PygameArenaWindow:
         self.match_status    = str(state.get("status", self.match_status))
         self.match_winner    = str(state.get("winner") or self.match_winner)
         self.countdown_ticks = int(state.get("countdown", 0))
+
+        # When the server announces a new throw target, queue it for the next blob.
+        throw_target = state.get("throw_target")
+        if throw_target:
+            tid = int(throw_target.get("id", -1))
+            if tid != self._last_throw_target_id:
+                self._last_throw_target_id = tid
+                tx = int(throw_target.get("x", 0))
+                ty = int(throw_target.get("y", 0))
+                px, py = self._game_to_pixel(tx, ty)
+                self._server_throw_target = (float(px), float(py))
+                self._server_throw_data = throw_target
+                # Trigger immediately if idle; otherwise it fires on next idle transition.
+                if self._throw_state == "idle":
+                    self._throw_state = "wind_up"
+                    self._throw_state_start = pygame.time.get_ticks()
+                    self._throw_blob_spawned = False
+
         if self.spectator_mode:
             self.render_snake_a = [(float(x), float(y)) for x, y in self.snake_a]
             self.render_snake_b = [(float(x), float(y)) for x, y in self.snake_b]
@@ -2206,12 +2328,38 @@ class PygameArenaWindow:
         def to_float(cells: list) -> list:
             return [(float(x), float(y)) for x, y in cells]
 
+        def _should_snap(old_cells: list, new_cells: list) -> bool:
+            if not old_cells or not new_cells:
+                return True
+            ox, oy = old_cells[0]
+            nx, ny = new_cells[0]
+            head_step = abs(int(nx) - int(ox)) + abs(int(ny) - int(oy))
+            # Snap when the head did not advance (common on obstacle/wall hits)
+            # or when a large correction happens (desync recovery/teleport).
+            return head_step == 0 or head_step > 1
+
         to_a = to_float(self.snake_a)
         to_b = to_float(self.snake_b)
-        from_a = (list(self.render_snake_a) if len(self.render_snake_a) == len(to_a) and self.render_snake_a
-                  else to_float(old_a or self.snake_a))
-        from_b = (list(self.render_snake_b) if len(self.render_snake_b) == len(to_b) and self.render_snake_b
-                  else to_float(old_b or self.snake_b))
+        snap_a = _should_snap(old_a, self.snake_a)
+        snap_b = _should_snap(old_b, self.snake_b)
+        from_a = (
+            list(to_a)
+            if snap_a
+            else (
+                list(self.render_snake_a)
+                if len(self.render_snake_a) == len(to_a) and self.render_snake_a
+                else to_float(old_a or self.snake_a)
+            )
+        )
+        from_b = (
+            list(to_b)
+            if snap_b
+            else (
+                list(self.render_snake_b)
+                if len(self.render_snake_b) == len(to_b) and self.render_snake_b
+                else to_float(old_b or self.snake_b)
+            )
+        )
         if len(from_a) != len(to_a):
             from_a = list(to_a)
         if len(from_b) != len(to_b):
@@ -2310,8 +2458,10 @@ class PygameArenaWindow:
         self.game_pies = {}
 
     def _adjust_snake_length(self, snake_cells: list, health: int) -> None:
-        growth = max(0, (health - LOCAL_INITIAL_HEALTH) // HEALTH_PER_GROWTH_SEGMENT)
-        target = BASE_SNAKE_LENGTH + growth
+        if health <= 0:
+            target = 1
+        else:
+            target = max(1, int(round((BASE_SNAKE_LENGTH * float(health)) / float(LOCAL_INITIAL_HEALTH))))
         if len(snake_cells) > target:
             del snake_cells[target:]
         elif len(snake_cells) < target and snake_cells:
@@ -2352,12 +2502,12 @@ class PygameArenaWindow:
             if pie_kind == "green":
                 health += PIE_HEALTH_GAIN
             elif pie_kind == "red":
-                health = max(0, health - 20)
-            elif pie_kind == "orange":
+                health = max(0, health - PIE_DAMAGE)
+            elif pie_kind == "yellow":
                 if health_attr == "snake_a_health":
-                    self.snake_b_health = max(0, self.snake_b_health - 20)
+                    self.snake_b_health = max(0, self.snake_b_health - PIE_DAMAGE)
                 else:
-                    self.snake_a_health = max(0, self.snake_a_health - 20)
+                    self.snake_a_health = max(0, self.snake_a_health - PIE_DAMAGE)
         else:
             snake_cells.pop()
         self._adjust_snake_length(snake_cells, health)
@@ -2414,16 +2564,17 @@ class PygameArenaWindow:
 
     def _draw_game_pies(self) -> None:
         ticks = pygame.time.get_ticks()
+        minimal = self.low_quality_mode
         for (col, row), kind in self.game_pies.items():
             cx, cy = self._game_to_pixel(col, row)
             cx, cy = int(cx), int(cy)
             pulse = 0.7 + 0.3 * math.sin(ticks / 400.0 + col * 0.7 + row * 1.3)
             r = max(4, int(GAME_CELL_H * 0.4 - 1 + 2 * pulse))
-            if kind == "orange":
-                body = (255, 142, 22)
-                highlight = (255, 238, 176)
-                glow = (255, 170, 42)
-                rim = (78, 32, 0)
+            if kind == "yellow":
+                body = (255, 220, 30)
+                highlight = (255, 252, 190)
+                glow = (255, 235, 60)
+                rim = (90, 60, 0)
             elif kind == "red":
                 body = (255, 36, 36)
                 highlight = (255, 216, 210)
@@ -2434,15 +2585,16 @@ class PygameArenaWindow:
                 highlight = (240, 255, 200)
                 glow = BERRY_COLOR
                 rim = (25, 90, 15)
-            # Glow
-            gs = pygame.Surface((r * 4 + 4, r * 4 + 4), pygame.SRCALPHA)
-            pygame.draw.circle(gs, (*glow, int(105 * pulse)), (r * 2 + 2, r * 2 + 2), r + 6)
-            self.screen.blit(gs, (cx - r * 2 - 2, cy - r * 2 - 2))
+            if not minimal:
+                # Glow
+                gs = pygame.Surface((r * 4 + 4, r * 4 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(gs, (*glow, int(105 * pulse)), (r * 2 + 2, r * 2 + 2), r + 6)
+                self.screen.blit(gs, (cx - r * 2 - 2, cy - r * 2 - 2))
             # Berry body
             pygame.draw.circle(self.screen, rim, (cx, cy), r + 1)
             pygame.draw.circle(self.screen, body, (cx, cy), r)
             pygame.draw.circle(self.screen, highlight, (cx - r // 3, cy - r // 3), max(2, r // 3))
-            if kind in {"orange", "red"}:
+            if kind in {"yellow", "red"}:
                 pygame.draw.circle(self.screen, (252, 252, 252), (cx, cy), r + 2, 1)
 
     def _draw_countdown_overlay(self) -> None:

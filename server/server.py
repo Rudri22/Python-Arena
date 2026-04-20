@@ -9,6 +9,7 @@ PBI 1.6: Route accepted sockets to a handler that does basic send/receive.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import socket
 import threading
 import time
@@ -91,6 +92,10 @@ def run_server(host: str, port: int) -> None:
         try:
             while True:
                 client_socket, client_address = server_socket.accept()
+                try:
+                    client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
                 print(f"[SERVER] Connection accepted from {client_address}")
 
                 # PBI 1.5 + PBI 1.6: each client runs in its own handler thread
@@ -112,6 +117,12 @@ def _send_socket_message(sock: socket.socket, message: dict) -> None:
     sock.sendall(encode_message_for_socket(message))
 
 
+def _send_socket_bytes(sock: socket.socket, payload: bytes) -> None:
+    """Server-level helper for sending already-encoded payload bytes."""
+
+    sock.sendall(payload)
+
+
 def _run_game_loop(server_state: ServerState) -> None:
     """
     Sprint 5 PBI 5.1 + 5.6 continuous match loop.
@@ -121,46 +132,68 @@ def _run_game_loop(server_state: ServerState) -> None:
     - GAME_OVER when a match finishes (players + spectators)
     """
 
-    while True:
-        updates = server_state.step_active_matches()
-        for update in updates:
-            game_id = str(update["game_id"])
-            state = dict(update["state"])
-            game_state_message = make_game_state_message(game_id=game_id, state=state)
-            # Sprint 5/6 reliability note:
-            # Use recipients captured in this tick update so final broadcasts
-            # still work even after session cleanup removed match mapping.
-            # Recipients include active players and spectators.
-            recipients = tuple(update.get("recipients", update.get("players", ())))
-            sockets: list[socket.socket] = []
-            for username in recipients:
-                sock = server_state.get_socket_for_username(str(username))
-                if sock is not None:
-                    sockets.append(sock)
-            for sock in sockets:
-                try:
-                    _send_socket_message(sock, game_state_message)
-                except OSError:
-                    continue
+    send_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=24,
+        thread_name_prefix="arena-send",
+    )
+    # One in-flight GAME_STATE send per socket. If a client is slow, we drop
+    # intermediate snapshots for that client instead of stalling the loop.
+    state_send_futures_by_fileno: dict[int, concurrent.futures.Future[None]] = {}
+    try:
+        while True:
+            updates = server_state.step_active_matches()
+            for update in updates:
+                game_id = str(update["game_id"])
+                state = dict(update["state"])
+                game_state_message = make_game_state_message(game_id=game_id, state=state)
+                game_state_payload = encode_message_for_socket(game_state_message)
+                # Sprint 5/6 reliability note:
+                # Use recipients captured in this tick update so final broadcasts
+                # still work even after session cleanup removed match mapping.
+                # Recipients include active players and spectators.
+                recipients = tuple(update.get("recipients", update.get("players", ())))
+                sockets: list[socket.socket] = []
+                for username in recipients:
+                    sock = server_state.get_socket_for_username(str(username))
+                    if sock is not None:
+                        sockets.append(sock)
 
-            game_over_payload = update.get("game_over")
-            if game_over_payload is not None:
-                game_over_message = make_game_over_message(
-                    game_id=game_id,
-                    winner=str(game_over_payload.get("winner", "draw")),
-                    final_scores=game_over_payload.get("final_scores"),
-                    reason=str(game_over_payload.get("reason", "match_finished")),
-                )
                 for sock in sockets:
-                    try:
-                        _send_socket_message(sock, game_over_message)
-                    except OSError:
+                    fileno = sock.fileno()
+                    if fileno < 0:
                         continue
-                # Refresh lobby metadata (idle/active split + win totals) after
-                # match teardown so leaderboard reflects new winner score.
-                broadcast_online_users(server_state)
+                    prev = state_send_futures_by_fileno.get(fileno)
+                    if prev is not None and not prev.done():
+                        continue
+                    state_send_futures_by_fileno[fileno] = send_executor.submit(
+                        _send_socket_bytes,
+                        sock,
+                        game_state_payload,
+                    )
 
-        time.sleep(GAME_TICK_SECONDS)
+                game_over_payload = update.get("game_over")
+                if game_over_payload is not None:
+                    game_over_message = make_game_over_message(
+                        game_id=game_id,
+                        winner=str(game_over_payload.get("winner", "draw")),
+                        final_scores=game_over_payload.get("final_scores"),
+                        reason=str(game_over_payload.get("reason", "match_finished")),
+                    )
+                    game_over_encoded = encode_message_for_socket(game_over_message)
+                    for sock in sockets:
+                        send_executor.submit(_send_socket_bytes, sock, game_over_encoded)
+                    # Refresh lobby metadata (idle/active split + win totals) after
+                    # match teardown so leaderboard reflects new winner score.
+                    broadcast_online_users(server_state)
+
+            # Trim completed futures to keep the map small over long uptime.
+            done_fds = [fd for fd, fut in state_send_futures_by_fileno.items() if fut.done()]
+            for fd in done_fds:
+                state_send_futures_by_fileno.pop(fd, None)
+
+            time.sleep(GAME_TICK_SECONDS)
+    finally:
+        send_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def main() -> None:
