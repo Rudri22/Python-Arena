@@ -268,6 +268,11 @@ class PygameArenaWindow:
             "speed": 58.0, "turn_rate": 0.85, "turn_timer": 2.2,
             "history": deque([(_sx, _sy)] * 650, maxlen=650),
         }
+        self._dj_set_surface = self._load_dj_set_art()
+        self._dj_rng = random.Random(123)
+        self._dj_tail_variation = pygame.Vector2(0.0, 0.0)
+        self._dj_head_variation = 0.0
+        self._dj_variation_next_ms = now_ms
 
         # Frame timing for delta-time-based motion (snakes, blobs).
         self._last_tick_ms = now_ms
@@ -454,6 +459,316 @@ class PygameArenaWindow:
         tinted.blit(glow, (0, 0))
 
         return tinted
+
+    def _load_dj_set_art(self) -> pygame.Surface | None:
+        """Load user-provided DJ deck art used by the arena snake idle scene."""
+
+        candidates = [ARENA_DIR / "dj_set.png"]
+        downloads = Path.home() / "Downloads"
+        if downloads.exists():
+            for found in downloads.glob("*Design_a_stylized_D.png"):
+                candidates.append(found)
+                break
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                raw = pygame.image.load(str(path)).convert_alpha()
+                return self._strip_dj_backdrop(raw)
+            except pygame.error:
+                continue
+        return None
+
+    def _strip_dj_backdrop(self, src: pygame.Surface) -> pygame.Surface:
+        """Remove edge-connected dark backdrop from the DJ set image."""
+
+        out = src.copy().convert_alpha()
+        w, h = out.get_size()
+        if w <= 1 or h <= 1:
+            return out
+
+        sample_pts = [
+            (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+            (w // 2, 0), (w // 2, h - 1), (0, h // 2), (w - 1, h // 2),
+        ]
+        bg_r = sum(out.get_at(p).r for p in sample_pts) // len(sample_pts)
+        bg_g = sum(out.get_at(p).g for p in sample_pts) // len(sample_pts)
+        bg_b = sum(out.get_at(p).b for p in sample_pts) // len(sample_pts)
+
+        dist_cut = 42.0
+        luma_cut = 112.0
+        seen = bytearray(w * h)
+        q: deque[tuple[int, int]] = deque()
+
+        def _idx(x: int, y: int) -> int:
+            return y * w + x
+
+        def _is_bg(x: int, y: int) -> bool:
+            c = out.get_at((x, y))
+            if c.a <= 8:
+                return True
+            dr = c.r - bg_r
+            dg = c.g - bg_g
+            db = c.b - bg_b
+            dist = (dr * dr + dg * dg + db * db) ** 0.5
+            luma = (0.299 * c.r) + (0.587 * c.g) + (0.114 * c.b)
+            return dist <= dist_cut and luma <= luma_cut
+
+        def _push(x: int, y: int) -> None:
+            ii = _idx(x, y)
+            if seen[ii]:
+                return
+            if not _is_bg(x, y):
+                return
+            seen[ii] = 1
+            q.append((x, y))
+
+        for x in range(w):
+            _push(x, 0)
+            _push(x, h - 1)
+        for y in range(h):
+            _push(0, y)
+            _push(w - 1, y)
+
+        while q:
+            x, y = q.popleft()
+            if x > 0:
+                _push(x - 1, y)
+            if x + 1 < w:
+                _push(x + 1, y)
+            if y > 0:
+                _push(x, y - 1)
+            if y + 1 < h:
+                _push(x, y + 1)
+
+        for y in range(h):
+            row = y * w
+            for x in range(w):
+                if seen[row + x]:
+                    r, g, b, _a = out.get_at((x, y))
+                    out.set_at((x, y), (r, g, b, 0))
+
+        rect = out.get_bounding_rect(min_alpha=8)
+        if rect.width > 0 and rect.height > 0:
+            trimmed = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            trimmed.blit(out, (0, 0), rect)
+            return trimmed
+        return out
+
+    def _draw_dj_serpent_idle(self, ticks: int, state: str, throw_progress: float) -> bool:
+        """Render the original arena serpent as a DJ behind the deck art."""
+
+        if self._dj_set_surface is None:
+            return False
+
+        ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
+        gap_left = self.arena_x + SIDE_EXTENSION_TILES * TILE_SIZE
+        gap_right = self.arena_x + self.arena_w - SIDE_EXTENSION_TILES * TILE_SIZE
+        gap_top = self.arena_y - ext_h + 8
+        gap_bottom = self.arena_y - 8
+        gap_w = max(80, gap_right - gap_left)
+        gap_h = max(80, gap_bottom - gap_top)
+        cx = (gap_left + gap_right) * 0.5
+        t = ticks / 1000.0
+
+        if ticks >= self._dj_variation_next_ms:
+            self._dj_tail_variation.x = self._dj_rng.uniform(-6.0, 6.0)
+            self._dj_tail_variation.y = self._dj_rng.uniform(-3.0, 3.0)
+            self._dj_head_variation = self._dj_rng.uniform(-1.2, 1.2)
+            self._dj_variation_next_ms = ticks + self._dj_rng.randint(650, 1350)
+
+        def _draw_serpent_points(points: list[tuple[float, float]], radius_scale: float = 1.0) -> None:
+            if len(points) < 2:
+                return
+            seg_n = len(points)
+            for i in range(seg_n):
+                seg_t = i / (seg_n - 1)
+                px, py = int(points[i][0]), int(points[i][1])
+                body = math.sin(math.pi * seg_t)
+                breath = 1.0 + 0.04 * math.sin(t * 2.2 + seg_t * 6.0)
+                r = max(3, int((6 + 8 * (0.3 + 0.7 * body)) * breath * radius_scale))
+                pygame.draw.circle(self.screen, (16, 58, 10), (px, py), r + 2)
+                pygame.draw.circle(self.screen, (27, 94, 18), (px, py), r + 1)
+                pygame.draw.circle(self.screen, (40, 132, 28), (px, py), r)
+                pygame.draw.circle(self.screen, (60, 172, 42), (px, py + max(1, r // 4)), max(2, r - 4))
+
+                if i % 4 == 0 and 1 <= i < seg_n - 1:
+                    tx = points[i + 1][0] - points[i - 1][0]
+                    ty = points[i + 1][1] - points[i - 1][1]
+                    norm = max(0.01, (tx * tx + ty * ty) ** 0.5)
+                    perp_x, perp_y = -ty / norm, tx / norm
+                    if perp_y > 0:
+                        perp_x, perp_y = -perp_x, -perp_y
+                    sx = int(px + perp_x * (r - 1))
+                    sy = int(py + perp_y * (r - 1))
+                    ex = int(px + perp_x * (r + 4))
+                    ey = int(py + perp_y * (r + 4))
+                    pygame.draw.line(self.screen, (12, 44, 8), (sx, sy), (ex, ey), 2)
+
+        def _bezier_points(
+            p0: pygame.Vector2,
+            p1: pygame.Vector2,
+            p2: pygame.Vector2,
+            p3: pygame.Vector2,
+            count: int,
+            amp: float,
+            tail_delay_s: float = 0.25,
+        ) -> list[tuple[float, float]]:
+            pts: list[tuple[float, float]] = []
+            for i in range(count):
+                u = i / (count - 1)
+                b = ((1.0 - u) ** 3) * p0
+                b += (3.0 * ((1.0 - u) ** 2) * u) * p1
+                b += (3.0 * (1.0 - u) * (u ** 2)) * p2
+                b += (u ** 3) * p3
+                # Traveling wave: tail lags head by ~0.25s.
+                seg_time = t - (1.0 - u) * tail_delay_s
+                wave = math.sin(OMEGA * seg_time + u * 1.6)
+                x = b.x + amp * wave
+                pts.append((float(x), float(b.y)))
+            return pts
+
+        dj_src = self._dj_set_surface
+        dj_scale = min((gap_w * 0.98) / dj_src.get_width(), (gap_h * 0.96) / dj_src.get_height())
+        dj_w = max(120, int(dj_src.get_width() * dj_scale))
+        dj_h = max(72, int(dj_src.get_height() * dj_scale))
+        dj = pygame.transform.smoothscale(dj_src, (dj_w, dj_h))
+        dj_rect = dj.get_rect(midbottom=(int(cx), int(gap_bottom + 4)))
+
+        # Snake anchors on the board:
+        # - tail exits from the back/top edge (behind equipment)
+        # - head emerges from center mixer/crossfader area
+        OMEGA = math.tau / 2.4  # ~2.4s loop; smooth infinite groove
+        mixer_anchor = pygame.Vector2(
+            dj_rect.x + dj_w * 0.50,
+            dj_rect.y + dj_h * 0.45,
+        )
+        back_anchor = pygame.Vector2(
+            dj_rect.x + dj_w * 0.50,
+            dj_rect.y + dj_h * 0.16,
+        )
+
+        head_sway = math.sin(OMEGA * t)  # head leads
+        tail_sway = math.sin(OMEGA * (t - 0.25))  # tail lags by 0.25s
+
+        base_x = mixer_anchor.x + head_sway * 4.5 + float(self._dj_head_variation) * 0.35
+        base_y = mixer_anchor.y + math.sin(OMEGA * (t - 0.10)) * 1.4
+        base = pygame.Vector2(base_x, base_y)
+
+        back = pygame.Vector2(
+            back_anchor.x + tail_sway * 11.0 + float(self._dj_tail_variation.x) * 0.35,
+            back_anchor.y + math.cos(OMEGA * (t - 0.25)) * 2.0 + float(self._dj_tail_variation.y) * 0.25,
+        )
+        tail_tip = pygame.Vector2(
+            back.x + tail_sway * 6.0,
+            back.y - 24.0 + math.cos(OMEGA * (t - 0.20)) * 1.4,
+        )
+
+        # Head pivots from the mixer base (transform-origin at base).
+        head_tilt = math.radians(10.0) * head_sway
+        head_len = 58.0
+        head = pygame.Vector2(
+            base.x + math.sin(head_tilt) * head_len + float(self._dj_head_variation) * 0.55,
+            base.y - math.cos(head_tilt) * head_len + math.cos(OMEGA * t + 0.25) * 2.8,
+        )
+        if state == "wind_up":
+            head.y -= 7.0 * throw_progress
+        elif state == "throw":
+            head.y += 3.0 * throw_progress
+
+        # Behind-board section (tail + back body) — lower z than the DJ board.
+        back_curve = _bezier_points(
+            tail_tip,
+            pygame.Vector2(back.x + 7.0, back.y + 10.0),
+            pygame.Vector2(base.x - 12.0, base.y + 14.0),
+            base,
+            count=18,
+            amp=3.6,
+        )
+        _draw_serpent_points(back_curve, radius_scale=0.82)
+
+        # Board surface drawn on top of the tail section.
+        self.screen.blit(dj, dj_rect.topleft)
+
+        # Front section (base -> head) — above mixer and board elements.
+        front_curve = _bezier_points(
+            base,
+            pygame.Vector2(base.x + 6.0, base.y - 24.0),
+            pygame.Vector2(head.x - 8.0, head.y + 16.0),
+            head,
+            count=20,
+            amp=5.0,
+        )
+        _draw_serpent_points(front_curve, radius_scale=0.96)
+
+        # Direction at head for face and headphones alignment.
+        hx_f, hy_f = front_curve[-1]
+        dir_x = hx_f - front_curve[-2][0]
+        dir_y = hy_f - front_curve[-2][1]
+        norm = max(0.01, math.hypot(dir_x, dir_y))
+        dir_x /= norm
+        dir_y /= norm
+        perp_x, perp_y = -dir_y, dir_x
+
+        hx, hy = int(hx_f), int(hy_f)
+        head_r = 15
+        pygame.draw.circle(self.screen, (14, 50, 8), (hx, hy), head_r + 4)
+        pygame.draw.circle(self.screen, (24, 84, 16), (hx, hy), head_r + 1)
+        pygame.draw.circle(self.screen, (38, 124, 26), (hx, hy), head_r)
+
+        snout_x = int(hx + dir_x * (head_r - 2))
+        snout_y = int(hy + dir_y * (head_r - 2))
+        pygame.draw.circle(self.screen, (34, 108, 24), (snout_x, snout_y), max(4, head_r - 5))
+
+        for sign in (-1, 1):
+            ex = int(hx + perp_x * sign * (head_r * 0.55) + dir_x * 5)
+            ey = int(hy + perp_y * sign * (head_r * 0.55) + dir_y * 5)
+            glow_s = pygame.Surface((34, 34), pygame.SRCALPHA)
+            pygame.draw.circle(glow_s, (0, 220, 60, 56), (17, 17), 12)
+            pygame.draw.circle(glow_s, (0, 255, 90, 98), (17, 17), 7)
+            self.screen.blit(glow_s, (ex - 17, ey - 17))
+            pygame.draw.circle(self.screen, (0, 255, 100), (ex, ey), 4)
+            pup_a = (int(ex - dir_x * 1.3), int(ey - dir_y * 1.3))
+            pup_b = (int(ex + dir_x * 1.3), int(ey + dir_y * 1.3))
+            pygame.draw.line(self.screen, (0, 0, 0), pup_a, pup_b, 2)
+
+        # Headphones aligned to head orientation.
+        cup_offset_side = head_r * 0.94
+        cup_offset_back = head_r * 0.2
+        left_cup = (
+            int(hx + perp_x * cup_offset_side - dir_x * cup_offset_back),
+            int(hy + perp_y * cup_offset_side - dir_y * cup_offset_back),
+        )
+        right_cup = (
+            int(hx - perp_x * cup_offset_side - dir_x * cup_offset_back),
+            int(hy - perp_y * cup_offset_side - dir_y * cup_offset_back),
+        )
+        for cx_, cy_ in (left_cup, right_cup):
+            pygame.draw.circle(self.screen, (20, 30, 40), (cx_, cy_), 6)
+            pygame.draw.circle(self.screen, (62, 84, 104), (cx_, cy_), 3)
+        band_a = (
+            int(left_cup[0] - dir_x * (head_r * 0.95)),
+            int(left_cup[1] - dir_y * (head_r * 0.95)),
+        )
+        band_b = (
+            int(right_cup[0] - dir_x * (head_r * 0.95)),
+            int(right_cup[1] - dir_y * (head_r * 0.95)),
+        )
+        pygame.draw.line(self.screen, (20, 30, 40), band_a, band_b, 4)
+        pygame.draw.line(self.screen, (64, 84, 104), band_a, band_b, 2)
+
+        if state == "throw" and not self._throw_blob_spawned and throw_progress >= 0.42:
+            throw_target = self._server_throw_target
+            if throw_target is not None:
+                dx = float(throw_target[0] - hx_f)
+                dy = float(throw_target[1] - hy_f)
+                dn = max(0.001, math.hypot(dx, dy))
+                throw_dir = (dx / dn, dy / dn)
+            else:
+                throw_dir = (dir_x, max(0.15, dir_y))
+            self._spawn_blob_from_head((float(hx_f), float(hy_f)), throw_dir)
+            self._throw_blob_spawned = True
+        return True
 
     def _remove_wall_backdrop(self, src: pygame.Surface) -> pygame.Surface:
         """Remove flat background by color-distance from corner samples."""
@@ -1130,6 +1445,10 @@ class PygameArenaWindow:
         self._update_throw_state(ticks)
         state = self._throw_state
         sp = self._throw_progress(ticks)
+
+        if self._draw_dj_serpent_idle(ticks, state, sp):
+            return
+
         # Keep serpent and throw timing active in all quality modes so gameplay
         # events (blob landings/pie spawns) stay deterministic.
         self._update_serpent_agent(self._step_dt)
