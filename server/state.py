@@ -62,6 +62,7 @@ class ServerState:
     _username_to_client: dict[str, str] = field(default_factory=dict)
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
     _client_skins: dict[str, SnakeSkin] = field(default_factory=dict)
+    _skins_by_username: dict[str, SnakeSkin] = field(default_factory=dict)
     # Keyed by normalized username for case-insensitive stability.
     _wins_by_user: dict[str, int] = field(default_factory=dict)
     # Per-online-username reconnect/session version to detect leave+rejoin.
@@ -106,9 +107,12 @@ class ServerState:
 
             if previous_username is not None:
                 owner_id = self._username_to_client.get(_normalize_username(previous_username))
+                game_id = self._find_game_id_for_user_locked(previous_username)
+                keep_session = game_id is not None and self._is_handoff_active_locked(game_id)
                 if owner_id == client_id:
                     self._username_to_client.pop(_normalize_username(previous_username), None)
-                    self._user_session_versions.pop(previous_username, None)
+                    if not keep_session:
+                        self._user_session_versions.pop(previous_username, None)
                 self._cleanup_user_lobby_state(previous_username)
 
             return sorted(self._username_to_client.keys())
@@ -138,11 +142,12 @@ class ServerState:
                 return events
 
             owner_id = self._username_to_client.get(_normalize_username(previous_username))
+            game_id = self._find_game_id_for_user_locked(previous_username)
+            keep_session = game_id is not None and self._is_handoff_active_locked(game_id)
             if owner_id == client_id:
                 self._username_to_client.pop(_normalize_username(previous_username), None)
-                self._user_session_versions.pop(previous_username, None)
-
-            game_id = self._find_game_id_for_user_locked(previous_username)
+                if not keep_session:
+                    self._user_session_versions.pop(previous_username, None)
             if game_id is not None:
                 if self._is_handoff_active_locked(game_id):
                     # Intentional GUI->Pygame switch in progress; keep match alive.
@@ -204,6 +209,9 @@ class ServerState:
 
             self._client_usernames[client_id] = username
             self._username_to_client[normalized_username] = client_id
+            remembered_skin = self._skins_by_username.get(normalized_username)
+            if remembered_skin is not None:
+                self._client_skins[client_id] = remembered_skin
             self._user_session_versions[username] = self._next_user_session_version
             self._wins_by_user[normalized_username] = self._wins_by_user.get(normalized_username, 0)
             self._next_user_session_version += 1
@@ -222,6 +230,9 @@ class ServerState:
         with self._lock:
             if client_id in self._client_usernames:
                 self._client_skins[client_id] = skin
+                username = self._client_usernames.get(client_id)
+                if username is not None:
+                    self._skins_by_username[_normalize_username(username)] = skin
 
     def get_skin_dict_for_username(self, username: str) -> dict[str, str]:
         """Return the skin dict for a username, or a default skin if unset."""
@@ -234,7 +245,22 @@ class ServerState:
 
         client_id = self._username_to_client.get(_normalize_username(username))
         skin = self._client_skins.get(client_id) if client_id is not None else None
+        if skin is None:
+            skin = self._skins_by_username.get(_normalize_username(username))
         return skin_to_dict(skin if skin is not None else SnakeSkin())
+
+    def _online_usernames_locked(self) -> list[str]:
+        """Return online usernames, keeping active-match players visible."""
+
+        names_by_cf: dict[str, str] = {
+            username.casefold(): username
+            for username in self._client_usernames.values()
+            if username is not None
+        }
+        for players in self._active_matches.values():
+            for username in players:
+                names_by_cf.setdefault(username.casefold(), username)
+        return sorted(names_by_cf.values(), key=str.casefold)
 
     def _match_skins_locked(self, players: tuple[str, str]) -> dict[str, dict[str, str]]:
         """Build authoritative skin map for both players in one active match."""
@@ -249,19 +275,14 @@ class ServerState:
         """Return all online usernames sorted for deterministic payloads."""
 
         with self._lock:
-            return sorted(
-                [username for username in self._client_usernames.values() if username is not None],
-                key=str.casefold,
-            )
+            return self._online_usernames_locked()
 
     def get_online_user_sessions(self) -> dict[str, int]:
         """Return online usernames mapped to their current session version."""
 
         with self._lock:
             result: dict[str, int] = {}
-            for username in self._client_usernames.values():
-                if username is None:
-                    continue
+            for username in self._online_usernames_locked():
                 result[username] = self._user_session_versions.get(username, 0)
             return result
 
@@ -270,9 +291,7 @@ class ServerState:
 
         with self._lock:
             result: dict[str, int] = {}
-            for username in self._client_usernames.values():
-                if username is None:
-                    continue
+            for username in self._online_usernames_locked():
                 result[username] = int(self._wins_by_user.get(_normalize_username(username), 0))
             return result
 
@@ -931,7 +950,7 @@ class ServerState:
         """Sprint 5 PBI 5.3: list online users who are not in active matches."""
 
         with self._lock:
-            online_users = [username for username in self._client_usernames.values() if username is not None]
+            online_users = self._online_usernames_locked()
             return sorted([user for user in online_users if user not in self._user_to_match], key=str.casefold)
 
     def _cleanup_user_lobby_state(self, username: str) -> None:
