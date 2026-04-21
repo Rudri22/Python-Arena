@@ -2018,6 +2018,9 @@ class PygameLobbyScene:
                         if target:
                             self._start_spectate(target, game_id=requested_game_id)
                     return
+                skins_payload = payload.get("skins")
+                if isinstance(skins_payload, dict):
+                    self.match_skins = {str(k): dict(v) for k, v in skins_payload.items() if isinstance(v, dict)}
                 target = self.pending_lobby_spectate_target
                 self.pending_lobby_spectate_target = None
                 self.pending_lobby_spectate_game_id = None

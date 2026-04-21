@@ -205,11 +205,16 @@ def _handle_invitation_message(
             send_message(client_socket, make_error_message(reason_to_error.get(reason, "Spectator join failed.")))
             return
 
+        match_skins: dict[str, dict] = {}
+        if players is not None:
+            for p in players:
+                match_skins[p] = server_state.get_skin_dict_for_username(p)
         spectator_notice = make_invitation_message(
             from_user="SERVER",
             to_user=sender_username,
             action="spectate_joined",
             game_id=resolved_game_id,
+            skins=match_skins,
         )
         send_message(client_socket, spectator_notice)
 

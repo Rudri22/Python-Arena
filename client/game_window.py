@@ -2686,16 +2686,7 @@ class PygameArenaWindow:
                     self._throw_state_start = pygame.time.get_ticks()
                     self._throw_blob_spawned = False
 
-        if self.spectator_mode:
-            self.render_snake_a = [(float(x), float(y)) for x, y in self.snake_a]
-            self.render_snake_b = [(float(x), float(y)) for x, y in self.snake_b]
-            self.interp_from_snake_a = []
-            self.interp_from_snake_b = []
-            self.interp_to_snake_a = []
-            self.interp_to_snake_b = []
-            self.state_interp_start_ms = 0
-        else:
-            self._start_state_interpolation(old_a, old_b)
+        self._start_state_interpolation(old_a, old_b)
 
     def _start_state_interpolation(self, old_a: list, old_b: list) -> None:
         def to_float(cells: list) -> list:
