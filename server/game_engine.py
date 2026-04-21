@@ -12,6 +12,8 @@ This module owns the authoritative match simulation used by the server:
 
 from __future__ import annotations
 
+import random
+import time
 from dataclasses import dataclass, field
 
 from shared.protocol import (
@@ -31,8 +33,9 @@ BOARD_WIDTH = 20
 BOARD_HEIGHT = 20
 INITIAL_SNAKE_LENGTH = 3
 # Temporary tuning for local testing: keep players alive much longer.
-INITIAL_HEALTH = 1000
-DEFAULT_PIE_HEALTH_GAIN = 15
+INITIAL_HEALTH = 1_000
+DEFAULT_PIE_HEALTH_GAIN = 30
+DEFAULT_PIE_DAMAGE = 40
 WALL_COLLISION_DAMAGE = 20
 OTHER_SNAKE_COLLISION_DAMAGE = 20
 SELF_COLLISION_DAMAGE = 20
@@ -62,9 +65,13 @@ STATIC_OBSTACLES: tuple[tuple[int, int], ...] = (
 )
 
 PIE_TYPES: tuple[dict[str, object], ...] = (
-    {"kind": "apple", "health_delta": 15, "points": 15},
-    {"kind": "golden", "health_delta": 25, "points": 25},
+    {"kind": "green", "effect": "self_heal", "amount": DEFAULT_PIE_HEALTH_GAIN, "points": 30},
+    {"kind": "yellow", "effect": "opponent_damage", "amount": DEFAULT_PIE_DAMAGE, "points": -40},
+    {"kind": "red", "effect": "self_damage", "amount": DEFAULT_PIE_DAMAGE, "points": -40},
 )
+# Interval bounds (in real-time seconds) between throw announcements.
+THROW_MIN_INTERVAL = 5
+THROW_MAX_INTERVAL = 8
 
 _DIRECTIONS: dict[str, tuple[int, int]] = {
     "up": (0, -1),
@@ -112,6 +119,13 @@ class MatchRuntime:
     pie_counter: int = 1
     lockstep_moves: dict[str, bool] = field(default_factory=dict)
     countdown_ticks: int = 25  # ~3 s at 0.12 s/tick; frozen until this reaches 0
+    # Authoritative wall-clock start (set when countdown completes).
+    started_at_monotonic: float | None = None
+    # Tick at which to announce the next throw target.
+    next_throw_tick: int = 3
+    # Active throw target broadcast to clients so they can aim blobs here.
+    # Format: {"x": int, "y": int, "kind": str, "id": int}
+    throw_target: dict | None = field(default=None)
 
 
 def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRuntime:
@@ -145,8 +159,6 @@ def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRun
         pies={},
         lockstep_moves={player_a: False, player_b: False},
     )
-    # Pies are not auto-spawned: they are only created when the arena serpent's
-    # poison blob lands on the island (client drives this via blob-landing events).
     return runtime
 
 
@@ -179,6 +191,34 @@ def should_step(runtime: MatchRuntime) -> bool:
     return runtime.status == "running"
 
 
+def _target_length_for_health(health: int) -> int:
+    """
+    Compute snake body length as a health-proportional value.
+
+    Baseline behavior:
+    - `INITIAL_HEALTH` -> `INITIAL_SNAKE_LENGTH`
+    - below baseline health shrinks length
+    - above baseline health grows length
+    """
+
+    if health <= 0:
+        return 1
+    scaled_length = (INITIAL_SNAKE_LENGTH * float(health)) / float(INITIAL_HEALTH)
+    return max(1, int(round(scaled_length)))
+
+
+def _sync_snake_length_to_health(snake: SnakeRuntime) -> None:
+    """Resize body (extend/shrink) so visual length stays proportional to health."""
+
+    target_length = _target_length_for_health(snake.health)
+    current_length = len(snake.body)
+    if current_length > target_length:
+        del snake.body[target_length:]
+        return
+    if current_length < target_length and snake.body:
+        snake.body.extend([snake.body[-1]] * (target_length - current_length))
+
+
 def step_runtime(runtime: MatchRuntime) -> None:
     """
     Advance one simulation tick.
@@ -189,8 +229,6 @@ def step_runtime(runtime: MatchRuntime) -> None:
 
     if runtime.status != "running":
         return
-
-    runtime.tick += 1
 
     # Apply queued directions before moving heads.
     for player, snake in runtime.snakes.items():
@@ -274,13 +312,38 @@ def step_runtime(runtime: MatchRuntime) -> None:
         else:
             ate_pie = True
             runtime.pies.pop(next_head, None)
-            gained = int(pie_info.get("health_delta", DEFAULT_PIE_HEALTH_GAIN))
-            snake.health += gained
+            effect = str(pie_info.get("effect", "self_heal"))
+            amount = int(pie_info.get("amount", DEFAULT_PIE_HEALTH_GAIN))
+            if effect == "self_heal":
+                snake.health += amount
+            elif effect == "self_damage":
+                snake.health = max(0, snake.health - amount)
+            elif effect == "opponent_damage":
+                opponent = next((name for name in runtime.players if name != player), None)
+                if opponent is not None and opponent in runtime.snakes:
+                    runtime.snakes[opponent].health = max(0, runtime.snakes[opponent].health - amount)
 
         snake.alive = snake.health > 0
 
-    # No auto-refill: pies arrive only from serpent-blob landings (client-driven).
-    _ = ate_pie  # retained for potential future scoring hooks
+    # Re-evaluate alive flags because opponent-damage pies can kill the other snake.
+    for snake in runtime.snakes.values():
+        snake.alive = snake.health > 0
+        _sync_snake_length_to_health(snake)
+
+    # Announce a new throw target periodically; clients aim their blobs here and
+    # send spawn_pie when the blob lands — the server then places the pie.
+    if runtime.tick >= runtime.next_throw_tick:
+        cell_and_pie = _pick_random_spawn(runtime)
+        if cell_and_pie is not None:
+            (cx, cy), pie_template = cell_and_pie
+            runtime.throw_target = {
+                "x": cx, "y": cy,
+                "kind": str(pie_template["kind"]),
+                "id": runtime.pie_counter,
+            }
+        runtime.next_throw_tick = runtime.tick + random.randint(
+            THROW_MIN_INTERVAL, THROW_MAX_INTERVAL
+        )
 
     _update_match_status(runtime)
 
@@ -343,31 +406,48 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
         status=runtime.status,
     )
     state_dict = state_to_dict(state)
+    # Include pie metadata so clients can render green/yellow/red variants.
+    state_dict["pies"] = [
+        {
+            "pie_id": f"pie-{runtime.pie_counter}-{idx}",
+            "position": {"x": x, "y": y},
+            "points": int(metadata.get("points", 1)),
+            "kind": str(metadata.get("kind", "green")),
+            "effect": str(metadata.get("effect", "self_heal")),
+            "amount": int(metadata.get("amount", DEFAULT_PIE_HEALTH_GAIN)),
+        }
+        for idx, ((x, y), metadata) in enumerate(sorted(runtime.pies.items()), start=1)
+    ]
     # Sprint 5 compatibility helper:
     # Provide numeric state for clients that expect 1=running, 0=not-running.
     state_dict["status_code"] = 1 if runtime.status == "running" else 0
     state_dict["countdown"] = runtime.countdown_ticks
+    # Broadcast active throw target so clients can aim blobs and send spawn_pie.
+    if runtime.throw_target is not None:
+        state_dict["throw_target"] = runtime.throw_target
     return state_dict
 
 
-def _spawn_next_pie(runtime: MatchRuntime) -> None:
-    """Spawn one pie on the first free deterministic board cell."""
+def _pick_random_spawn(
+    runtime: MatchRuntime,
+) -> tuple[tuple[int, int], dict] | None:
+    """Return a (cell, pie_template) for the next throw, or None if the board is full."""
 
-    occupied = set(runtime.obstacles.keys())
+    occupied: set[tuple[int, int]] = set(runtime.obstacles)
     for snake in runtime.snakes.values():
         occupied.update(snake.body)
-    occupied.update(runtime.pies.keys())
+    occupied.update(runtime.pies)
 
-    pie_template = PIE_TYPES[(runtime.pie_counter - 1) % len(PIE_TYPES)]
+    valid = [
+        (x, y)
+        for y in range(ISLAND_ROW_MIN, ISLAND_ROW_MAX + 1)
+        for x in range(ISLAND_COL_MIN, ISLAND_COL_MAX + 1)
+        if (x, y) not in occupied
+    ]
+    if not valid:
+        return None
 
-    for y in range(ISLAND_ROW_MIN, ISLAND_ROW_MAX + 1):
-        for x in range(ISLAND_COL_MIN, ISLAND_COL_MAX + 1):
-            if (x, y) not in occupied:
-                runtime.pies = {(x, y): dict(pie_template)}
-                runtime.pie_counter += 1
-                return
-
-    runtime.pies.clear()
+    return random.choice(valid), dict(random.choice(PIE_TYPES))
 
 
 def _update_match_status(runtime: MatchRuntime) -> None:

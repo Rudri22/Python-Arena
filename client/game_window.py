@@ -10,6 +10,7 @@ This version intentionally focuses on environment art only:
 from __future__ import annotations
 
 import math
+import os
 import random
 from collections import deque
 from pathlib import Path
@@ -41,6 +42,10 @@ WINDOW_WIDTH = 1220
 WINDOW_HEIGHT = 780
 WINDOW_TITLE = "Python-Arena - Arena Rebuild"
 TARGET_FPS = 60
+LOW_QUALITY_FPS_THRESHOLD = 24.0
+LOW_QUALITY_RECOVER_FPS_THRESHOLD = 48.0
+PERF_CHECK_INTERVAL_MS = 2000
+MIN_FPS_SAMPLES_FOR_SWITCH = 12
 
 SKY_BG_COLOR = (94, 98, 108)
 GRID_COLS = 20
@@ -51,6 +56,7 @@ SIDE_EXTENSION_TILES = 5
 ARENA_TOP = 255
 ARENA_DIR = Path(__file__).resolve().parents[1] / "assets" / "arena"
 TERRAIN_DIR = Path(__file__).resolve().parents[1] / "assets" / "terrain"
+SOUNDS_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
 
 # ── Gameplay grid (mirrors server/game_engine.py) ──────────────────────────
 GAME_BOARD_COLS = 20
@@ -65,9 +71,9 @@ GAP_COL_START = SIDE_EXTENSION_TILES                      # col 5
 GAP_COL_END   = GRID_COLS - SIDE_EXTENSION_TILES          # col 15
 GAP_ROW_END   = int(SIDE_EXTENSION_ROWS * TILE_SIZE / GAME_CELL_H) + 1  # ≈ row 7
 BASE_SNAKE_LENGTH = 3
-LOCAL_INITIAL_HEALTH = 1000
-HEALTH_PER_GROWTH_SEGMENT = 10
-PIE_HEALTH_GAIN = 15
+LOCAL_INITIAL_HEALTH = 1_000
+PIE_HEALTH_GAIN = 30
+PIE_DAMAGE = 40
 OBSTACLE_COLLISION_DAMAGE = 20
 SNAKE_COLLISION_DAMAGE = 20
 MOVE_INTERVAL_MS = 120
@@ -112,6 +118,7 @@ class PygameArenaWindow:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.key.set_repeat(350, 35)
         self.clock = pygame.time.Clock()
         self.running = True
 
@@ -237,13 +244,16 @@ class PygameArenaWindow:
         ]
 
         # Big serpent throwing state machine.
-        # IDLE -> WIND_UP -> THROW (blob spawns) -> RECOVER -> IDLE, every ~5s.
         now_ms = pygame.time.get_ticks()
         self._throw_state = "idle"
         self._throw_state_start = now_ms
-        self._next_throw_time = now_ms + 2500  # first throw 2.5s after start
+        self._next_throw_time = now_ms + 2500  # first cosmetic throw 2.5s after start
         self._throw_blob_spawned = False
         self._poison_blobs: list[dict] = []
+        # Server-provided throw target: pixel coords for aiming, raw data for spawn_pie.
+        self._server_throw_target: tuple[float, float] | None = None
+        self._server_throw_data: dict | None = None  # {x, y, kind, id}
+        self._last_throw_target_id: int | None = None
 
         # Big serpent agent — navigates the gap above the arena.
         _ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
@@ -259,10 +269,23 @@ class PygameArenaWindow:
             "speed": 58.0, "turn_rate": 0.85, "turn_timer": 2.2,
             "history": deque([(_sx, _sy)] * 650, maxlen=650),
         }
+        self._dj_set_surface = self._load_dj_set_art()
+        self._dj_rng = random.Random(123)
+        self._dj_tail_variation = pygame.Vector2(0.0, 0.0)
+        self._dj_head_variation = 0.0
+        self._dj_variation_next_ms = now_ms
 
         # Frame timing for delta-time-based motion (snakes, blobs).
         self._last_tick_ms = now_ms
         self._step_dt = 1.0 / TARGET_FPS
+        # Runtime performance adaptation for lower-end laptops.
+        self._force_low_quality = str(os.getenv("PYTHON_ARENA_LOW_QUALITY", "")).strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        self.low_quality_mode = self._force_low_quality
+        self._fps_samples: deque[float] = deque(maxlen=48)
+        self._last_perf_check_ms = now_ms
+        self._tiled_lava_cache: dict[int, pygame.Surface] = {}
 
         # ── Gameplay networking ────────────────────────────────────────
         self.connection: ClientConnection | None = None
@@ -270,20 +293,26 @@ class PygameArenaWindow:
         self.incoming_queue: queue.Queue[dict] = queue.Queue()
         self.username_confirmed = False
         self.online_users: list[str] = []
+        self.active_matches: list[dict[str, object]] = []
         self.pending_invite_to: str | None = None
         self.pending_invite_sent_ms = 0
         self.pending_spectate_to: str | None = None
+        self.pending_spectate_game_id: str | None = None
         self.active_game_id: str | None = None
         self.has_authoritative_state = False
         self.match_status = "waiting"
         self.match_winner = "-"
         self.countdown_ticks = 0
+        self._game_sound_started = False
+        self.timer_total = 300
         self.timer_remaining = 0
         self.timer_elapsed = 0
+        self._timer_anchor_ms: int | None = None
         self.connection_healthy = True
         self.connection_notice = ""
         self.player_a_name = username
         self.player_b_name = "Opponent"
+        self.match_players: tuple[str, str] | None = None
         self.last_server_message = "Connecting..."
         self.last_move_ms = now_ms
         self.direction_bindings = load_direction_bindings()
@@ -296,7 +325,7 @@ class PygameArenaWindow:
         self.snake_b_direction = "left"
         self.snake_a_health = LOCAL_INITIAL_HEALTH
         self.snake_b_health = LOCAL_INITIAL_HEALTH
-        self.game_pies: list[tuple[int, int]] = []
+        self.game_pies: dict[tuple[int, int], str] = {}
         self.game_obstacles: list[tuple[int, int]] = []
 
         # ── Interpolation ──────────────────────────────────────────────
@@ -317,6 +346,7 @@ class PygameArenaWindow:
         self.return_to_lobby_requested = False
         self.chat_messages: deque[str] = deque(maxlen=6)
         self.chat_input = ""
+        self.chat_cursor = 0
         self.chat_typing = False
         self.cheer_pulse_until_ms = 0
 
@@ -431,6 +461,321 @@ class PygameArenaWindow:
         tinted.blit(glow, (0, 0))
 
         return tinted
+
+    def _load_dj_set_art(self) -> pygame.Surface | None:
+        """Load user-provided DJ deck art used by the arena snake idle scene."""
+
+        candidates = [ARENA_DIR / "dj_set.png"]
+        downloads = Path.home() / "Downloads"
+        if downloads.exists():
+            for found in downloads.glob("*Design_a_stylized_D.png"):
+                candidates.append(found)
+                break
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                raw = pygame.image.load(str(path)).convert_alpha()
+                return self._strip_dj_backdrop(raw)
+            except pygame.error:
+                continue
+        return None
+
+    def _strip_dj_backdrop(self, src: pygame.Surface) -> pygame.Surface:
+        """Remove edge-connected dark backdrop from the DJ set image."""
+
+        out = src.copy().convert_alpha()
+        w, h = out.get_size()
+        if w <= 1 or h <= 1:
+            return out
+
+        sample_pts = [
+            (0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
+            (w // 2, 0), (w // 2, h - 1), (0, h // 2), (w - 1, h // 2),
+        ]
+        bg_r = sum(out.get_at(p).r for p in sample_pts) // len(sample_pts)
+        bg_g = sum(out.get_at(p).g for p in sample_pts) // len(sample_pts)
+        bg_b = sum(out.get_at(p).b for p in sample_pts) // len(sample_pts)
+
+        dist_cut = 42.0
+        luma_cut = 112.0
+        seen = bytearray(w * h)
+        q: deque[tuple[int, int]] = deque()
+
+        def _idx(x: int, y: int) -> int:
+            return y * w + x
+
+        def _is_bg(x: int, y: int) -> bool:
+            c = out.get_at((x, y))
+            if c.a <= 8:
+                return True
+            dr = c.r - bg_r
+            dg = c.g - bg_g
+            db = c.b - bg_b
+            dist = (dr * dr + dg * dg + db * db) ** 0.5
+            luma = (0.299 * c.r) + (0.587 * c.g) + (0.114 * c.b)
+            return dist <= dist_cut and luma <= luma_cut
+
+        def _push(x: int, y: int) -> None:
+            ii = _idx(x, y)
+            if seen[ii]:
+                return
+            if not _is_bg(x, y):
+                return
+            seen[ii] = 1
+            q.append((x, y))
+
+        for x in range(w):
+            _push(x, 0)
+            _push(x, h - 1)
+        for y in range(h):
+            _push(0, y)
+            _push(w - 1, y)
+
+        while q:
+            x, y = q.popleft()
+            if x > 0:
+                _push(x - 1, y)
+            if x + 1 < w:
+                _push(x + 1, y)
+            if y > 0:
+                _push(x, y - 1)
+            if y + 1 < h:
+                _push(x, y + 1)
+
+        for y in range(h):
+            row = y * w
+            for x in range(w):
+                if seen[row + x]:
+                    r, g, b, _a = out.get_at((x, y))
+                    out.set_at((x, y), (r, g, b, 0))
+
+        rect = out.get_bounding_rect(min_alpha=8)
+        if rect.width > 0 and rect.height > 0:
+            trimmed = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            trimmed.blit(out, (0, 0), rect)
+            return trimmed
+        return out
+
+    def _draw_dj_serpent_idle(self, ticks: int, state: str, throw_progress: float) -> bool:
+        """Render the original arena serpent as a DJ behind the deck art."""
+
+        DEBUG_DJ = False  # Set True to draw red dots at tail_anchor, head_anchor, and all body segments
+
+        if self._dj_set_surface is None:
+            return False
+
+        ext_h = SIDE_EXTENSION_ROWS * TILE_SIZE
+        gap_left = self.arena_x + SIDE_EXTENSION_TILES * TILE_SIZE
+        gap_right = self.arena_x + self.arena_w - SIDE_EXTENSION_TILES * TILE_SIZE
+        gap_top = self.arena_y - ext_h + 8
+        gap_bottom = self.arena_y - 8
+        gap_w = max(80, gap_right - gap_left)
+        gap_h = max(80, gap_bottom - gap_top)
+        cx = (gap_left + gap_right) * 0.5
+        t = ticks / 1000.0
+
+        if ticks >= self._dj_variation_next_ms:
+            self._dj_tail_variation.x = self._dj_rng.uniform(-6.0, 6.0)
+            self._dj_tail_variation.y = self._dj_rng.uniform(-3.0, 3.0)
+            self._dj_head_variation = self._dj_rng.uniform(-1.2, 1.2)
+            self._dj_variation_next_ms = ticks + self._dj_rng.randint(650, 1350)
+
+        def _draw_serpent_points(points: list[tuple[float, float]], radius_scale: float = 1.0) -> None:
+            if len(points) < 2:
+                return
+            seg_n = len(points)
+            for i in range(seg_n):
+                seg_t = i / (seg_n - 1)
+                px, py = int(points[i][0]), int(points[i][1])
+                body = math.sin(math.pi * seg_t)
+                breath = 1.0 + 0.04 * math.sin(t * 2.2 + seg_t * 6.0)
+                r = max(3, int((6 + 8 * (0.3 + 0.7 * body)) * breath * radius_scale))
+                pygame.draw.circle(self.screen, (16, 58, 10), (px, py), r + 2)
+                pygame.draw.circle(self.screen, (27, 94, 18), (px, py), r + 1)
+                pygame.draw.circle(self.screen, (40, 132, 28), (px, py), r)
+                pygame.draw.circle(self.screen, (60, 172, 42), (px, py + max(1, r // 4)), max(2, r - 4))
+
+                if i % 4 == 0 and 1 <= i < seg_n - 1:
+                    tx = points[i + 1][0] - points[i - 1][0]
+                    ty = points[i + 1][1] - points[i - 1][1]
+                    norm = max(0.01, (tx * tx + ty * ty) ** 0.5)
+                    perp_x, perp_y = -ty / norm, tx / norm
+                    if perp_y > 0:
+                        perp_x, perp_y = -perp_x, -perp_y
+                    sx = int(px + perp_x * (r - 1))
+                    sy = int(py + perp_y * (r - 1))
+                    ex = int(px + perp_x * (r + 4))
+                    ey = int(py + perp_y * (r + 4))
+                    pygame.draw.line(self.screen, (12, 44, 8), (sx, sy), (ex, ey), 2)
+
+        def _bezier_points(
+            p0: pygame.Vector2,
+            p1: pygame.Vector2,
+            p2: pygame.Vector2,
+            p3: pygame.Vector2,
+            count: int,
+            amp: float,
+            tail_delay_s: float = 0.30,
+        ) -> list[tuple[float, float]]:
+            pts: list[tuple[float, float]] = []
+            for i in range(count):
+                u = i / (count - 1)
+                b = ((1.0 - u) ** 3) * p0
+                b += (3.0 * ((1.0 - u) ** 2) * u) * p1
+                b += (3.0 * (1.0 - u) * (u ** 2)) * p2
+                b += (u ** 3) * p3
+                # Traveling wave: phase offset interpolated linearly — tail lags head by tail_delay_s.
+                seg_time = t - (1.0 - u) * tail_delay_s
+                wave = math.sin(OMEGA * seg_time + u * 1.6)
+                x = b.x + amp * wave
+                pts.append((float(x), float(b.y)))
+            return pts
+
+        dj_src = self._dj_set_surface
+        dj_scale = min((gap_w * 0.98) / dj_src.get_width(), (gap_h * 0.96) / dj_src.get_height())
+        dj_w = max(120, int(dj_src.get_width() * dj_scale))
+        dj_h = max(72, int(dj_src.get_height() * dj_scale))
+        dj = pygame.transform.smoothscale(dj_src, (dj_w, dj_h))
+        dj_rect = dj.get_rect(midbottom=(int(cx), int(gap_bottom + 4)))
+
+        OMEGA = math.tau / 1.75  # ~1.75s per sway cycle (within 1.5–2s range)
+
+        # Anchor points shifted backward so the snake stays behind the DJ set.
+        depth_back_shift = -26.0
+        tail_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top + depth_back_shift)
+        head_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top + dj_h * 0.12 + depth_back_shift)
+
+        head_sway = math.sin(OMEGA * t)           # head leads
+        tail_sway = math.sin(OMEGA * (t - 0.30))  # tail lags by 0.3s
+
+        # Head base position: reduced sway while staying behind board.
+        base_x = head_anchor.x + head_sway * 14.0 + float(self._dj_head_variation) * 0.35
+        base_y = head_anchor.y + math.sin(OMEGA * (t - 0.10)) * 1.1
+        base = pygame.Vector2(base_x, base_y)
+
+        # Tail position behind top edge with same phase lag.
+        back = pygame.Vector2(
+            tail_anchor.x + tail_sway * 16.0 + float(self._dj_tail_variation.x) * 0.35,
+            tail_anchor.y + math.cos(OMEGA * (t - 0.30)) * 1.6 + float(self._dj_tail_variation.y) * 0.25,
+        )
+        tail_tip = pygame.Vector2(
+            back.x + tail_sway * 10.0,
+            back.y - 24.0 + math.cos(OMEGA * (t - 0.25)) * 1.4,
+        )
+
+        # Head pivots from hidden base, but remains above deck top.
+        head_tilt = math.radians(10.0) * head_sway
+        head_len = 20.0
+        head = pygame.Vector2(
+            base.x + math.sin(head_tilt) * head_len + float(self._dj_head_variation) * 0.55,
+            dj_rect.y + 4.0 + math.cos(OMEGA * t + 0.25) * 2.0,
+        )
+        if state == "wind_up":
+            head.y -= 7.0 * throw_progress
+        elif state == "throw":
+            head.y += 3.0 * throw_progress
+
+        # LAYERING 1: Behind-board section (tail + back body) — below the DJ board surface.
+        back_curve = _bezier_points(
+            tail_tip,
+            pygame.Vector2(back.x + 7.0, back.y + 10.0),
+            pygame.Vector2(base.x - 12.0, base.y + 14.0),
+            base,
+            count=18,
+            amp=12.0,
+        )
+        _draw_serpent_points(back_curve, radius_scale=0.82)
+
+        # Keep the entire front body behind board; only the head should show above.
+        front_curve = _bezier_points(
+            base,
+            pygame.Vector2(base.x + 5.0, base.y - 22.0),
+            pygame.Vector2(base.x + 2.0, dj_rect.y + dj_h * 0.24),
+            pygame.Vector2(base.x, dj_rect.y + dj_h * 0.26),
+            count=20,
+            amp=10.0,
+        )
+        _draw_serpent_points(front_curve, radius_scale=0.82)
+
+        # LAYERING 2: Board surface drawn in front of body.
+        self.screen.blit(dj, dj_rect.topleft)
+
+        # Debug: red dots at tail_anchor, head_anchor, and every body segment point.
+        if DEBUG_DJ:
+            pygame.draw.circle(self.screen, (255, 0, 0), (int(tail_anchor.x), int(tail_anchor.y)), 6)
+            pygame.draw.circle(self.screen, (255, 0, 0), (int(head_anchor.x), int(head_anchor.y)), 6)
+            for pt in back_curve:
+                pygame.draw.circle(self.screen, (255, 0, 0), (int(pt[0]), int(pt[1])), 3)
+            for pt in front_curve:
+                pygame.draw.circle(self.screen, (255, 0, 0), (int(pt[0]), int(pt[1])), 3)
+
+        # Direction at head tip for face and headphones alignment.
+        # Face downward toward the arena center.
+        hx_f, hy_f = float(head.x), float(head.y)
+        arena_watch_x = self.arena_x + self.arena_w * 0.5
+        arena_watch_y = self.arena_y + self.arena_h * 0.62
+        dir_x = arena_watch_x - hx_f
+        dir_y = arena_watch_y - hy_f
+        norm = max(0.01, math.hypot(dir_x, dir_y))
+        dir_x /= norm
+        dir_y /= norm
+        perp_x, perp_y = -dir_y, dir_x
+
+        hx, hy = int(hx_f), int(hy_f)
+        head_r = 15
+        pygame.draw.circle(self.screen, (14, 50, 8), (hx, hy), head_r + 4)
+        pygame.draw.circle(self.screen, (24, 84, 16), (hx, hy), head_r + 1)
+        pygame.draw.circle(self.screen, (38, 124, 26), (hx, hy), head_r)
+
+        snout_x = int(hx + dir_x * (head_r - 2))
+        snout_y = int(hy + dir_y * (head_r - 2))
+        pygame.draw.circle(self.screen, (34, 108, 24), (snout_x, snout_y), max(4, head_r - 5))
+
+        # Two small white dot eyes.
+        for sign in (-1, 1):
+            ex = int(hx + perp_x * sign * (head_r * 0.52) + dir_x * 5)
+            ey = int(hy + perp_y * sign * (head_r * 0.52) + dir_y * 5)
+            pygame.draw.circle(self.screen, (240, 240, 240), (ex, ey), 4)
+            pygame.draw.circle(self.screen, (10, 10, 10), (ex, ey), 2)
+
+        # Headphones aligned to head orientation.
+        cup_offset_side = head_r * 0.94
+        cup_offset_back = head_r * 0.2
+        left_cup = (
+            int(hx + perp_x * cup_offset_side - dir_x * cup_offset_back),
+            int(hy + perp_y * cup_offset_side - dir_y * cup_offset_back),
+        )
+        right_cup = (
+            int(hx - perp_x * cup_offset_side - dir_x * cup_offset_back),
+            int(hy - perp_y * cup_offset_side - dir_y * cup_offset_back),
+        )
+        for cx_, cy_ in (left_cup, right_cup):
+            pygame.draw.circle(self.screen, (20, 30, 40), (cx_, cy_), 6)
+            pygame.draw.circle(self.screen, (62, 84, 104), (cx_, cy_), 3)
+        band_a = (
+            int(left_cup[0] - dir_x * (head_r * 0.95)),
+            int(left_cup[1] - dir_y * (head_r * 0.95)),
+        )
+        band_b = (
+            int(right_cup[0] - dir_x * (head_r * 0.95)),
+            int(right_cup[1] - dir_y * (head_r * 0.95)),
+        )
+        pygame.draw.line(self.screen, (20, 30, 40), band_a, band_b, 4)
+        pygame.draw.line(self.screen, (64, 84, 104), band_a, band_b, 2)
+
+        if state == "throw" and not self._throw_blob_spawned and throw_progress >= 0.42:
+            throw_target = self._server_throw_target
+            if throw_target is not None:
+                dx = float(throw_target[0] - hx_f)
+                dy = float(throw_target[1] - hy_f)
+                dn = max(0.001, math.hypot(dx, dy))
+                throw_dir = (dx / dn, dy / dn)
+            else:
+                throw_dir = (dir_x, max(0.15, dir_y))
+            self._spawn_blob_from_head((float(hx_f), float(hy_f)), throw_dir)
+            self._throw_blob_spawned = True
+        return True
 
     def _remove_wall_backdrop(self, src: pygame.Surface) -> pygame.Surface:
         """Remove flat background by color-distance from corner samples."""
@@ -689,6 +1034,7 @@ class PygameArenaWindow:
             self._draw_frame()
             pygame.display.flip()
             self.clock.tick(TARGET_FPS)
+            self._update_runtime_quality()
 
         self._disconnect_from_server()
         if self.return_to_lobby_requested and self.return_to_tk_lobby:
@@ -699,6 +1045,48 @@ class PygameArenaWindow:
         else:
             pygame.quit()
         return self.return_to_lobby_requested
+
+    def _update_runtime_quality(self) -> None:
+        """Auto-toggle low-quality rendering when FPS drops on weaker devices."""
+
+        if self._force_low_quality:
+            return
+        fps = self.clock.get_fps()
+        if fps >= 1.0:
+            self._fps_samples.append(float(fps))
+
+        now = pygame.time.get_ticks()
+        if now - self._last_perf_check_ms < PERF_CHECK_INTERVAL_MS:
+            return
+        self._last_perf_check_ms = now
+
+        if len(self._fps_samples) < MIN_FPS_SAMPLES_FOR_SWITCH:
+            return
+        avg_fps = sum(self._fps_samples) / len(self._fps_samples)
+
+        if not self.low_quality_mode and avg_fps < LOW_QUALITY_FPS_THRESHOLD:
+            self.low_quality_mode = True
+            self.chat_messages.append("[SYSTEM] Performance mode enabled for smoother gameplay.")
+            return
+        if self.low_quality_mode and avg_fps > LOW_QUALITY_RECOVER_FPS_THRESHOLD:
+            self.low_quality_mode = False
+            self.chat_messages.append("[SYSTEM] Performance mode disabled.")
+
+    def _get_tiled_lava_layer(self, frame_index: int) -> pygame.Surface:
+        """Build/cache full-screen tiled lava for a specific animation frame."""
+
+        cached = self._tiled_lava_cache.get(frame_index)
+        if cached is not None:
+            return cached
+
+        frame = self.lava_frames[frame_index]
+        tile = TILE_SIZE
+        layer = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT)).convert()
+        for y in range(0, WINDOW_HEIGHT, tile):
+            for x in range(0, WINDOW_WIDTH, tile):
+                layer.blit(frame, (x, y))
+        self._tiled_lava_cache[frame_index] = layer
+        return layer
 
     def _handle_events(self) -> None:
         for event in pygame.event.get():
@@ -712,10 +1100,19 @@ class PygameArenaWindow:
                 elif event.key == pygame.K_r and self.show_result_screen:
                     self.return_to_lobby_requested = True
                     self.running = False
+                    try:
+                        lobby_file = SOUNDS_DIR / "preolobby-lobby.mpeg"
+                        if lobby_file.exists():
+                            pygame.mixer.music.stop()
+                            pygame.mixer.music.load(str(lobby_file))
+                            pygame.mixer.music.play(-1)
+                    except Exception:
+                        pass
                 elif event.key == pygame.K_c:
                     self.cheer_pulse_until_ms = pygame.time.get_ticks() + 650
                 elif event.key == pygame.K_t:
                     self.chat_typing = True
+                    self.chat_cursor = len(self.chat_input)
                 self._handle_direction_input(event.key)
 
     def _handle_chat_key(self, event: pygame.event.Event) -> bool:
@@ -724,20 +1121,44 @@ class PygameArenaWindow:
                 self._submit_chat()
             else:
                 self.chat_typing = True
+                self.chat_cursor = len(self.chat_input)
             return True
         if event.key == pygame.K_ESCAPE and self.chat_typing:
             self.chat_typing = False
             self.chat_input = ""
+            self.chat_cursor = 0
             return True
         if not self.chat_typing:
             return False
         if event.key == pygame.K_BACKSPACE:
-            self.chat_input = self.chat_input[:-1]
+            if self.chat_cursor > 0:
+                self.chat_input = self.chat_input[: self.chat_cursor - 1] + self.chat_input[self.chat_cursor :]
+                self.chat_cursor -= 1
+            return True
+        if event.key == pygame.K_DELETE:
+            if self.chat_cursor < len(self.chat_input):
+                self.chat_input = self.chat_input[: self.chat_cursor] + self.chat_input[self.chat_cursor + 1 :]
+            return True
+        if event.key == pygame.K_LEFT:
+            self.chat_cursor = max(0, self.chat_cursor - 1)
+            return True
+        if event.key == pygame.K_RIGHT:
+            self.chat_cursor = min(len(self.chat_input), self.chat_cursor + 1)
+            return True
+        if event.key == pygame.K_HOME:
+            self.chat_cursor = 0
+            return True
+        if event.key == pygame.K_END:
+            self.chat_cursor = len(self.chat_input)
             return True
         if event.unicode and event.unicode.isprintable():
-            self.chat_input += event.unicode
-            if len(self.chat_input) > 120:
-                self.chat_input = self.chat_input[:120]
+            if len(self.chat_input) < 120:
+                self.chat_input = (
+                    self.chat_input[: self.chat_cursor]
+                    + event.unicode
+                    + self.chat_input[self.chat_cursor :]
+                )
+                self.chat_cursor = min(len(self.chat_input), self.chat_cursor + len(event.unicode))
             return True
         return False
 
@@ -745,6 +1166,7 @@ class PygameArenaWindow:
         text = self.chat_input.strip()
         self.chat_typing = False
         self.chat_input = ""
+        self.chat_cursor = 0
         if not text or self.connection is None:
             return
         try:
@@ -813,16 +1235,14 @@ class PygameArenaWindow:
         if not self.lava_frames:
             return
 
-        frame = self.lava_frames[(pygame.time.get_ticks() // 120) % len(self.lava_frames)]
-        tile = TILE_SIZE
-
-        for y in range(0, self.screen.get_height(), tile):
-            for x in range(0, self.screen.get_width(), tile):
-                self.screen.blit(frame, (x, y))
+        frame_index = (pygame.time.get_ticks() // 120) % len(self.lava_frames)
+        self.screen.blit(self._get_tiled_lava_layer(frame_index), (0, 0))
 
     def _draw_lava_rocks(self) -> None:
         """Draw animated poison rocks in lava zones, excluding grid vicinity."""
 
+        if self.low_quality_mode:
+            return
         if not self.lava_rock_frames:
             return
         frame = self.lava_rock_frames[(pygame.time.get_ticks() // 110) % len(self.lava_rock_frames)]
@@ -900,7 +1320,8 @@ class PygameArenaWindow:
         elapsed = ticks - self._throw_state_start
 
         if state == "idle":
-            if ticks >= self._next_throw_time:
+            # Throw when the server queues an event OR when the local timer fires.
+            if self._server_throw_target is not None or ticks >= self._next_throw_time:
                 self._throw_state = "wind_up"
                 self._throw_state_start = ticks
                 self._throw_blob_spawned = False
@@ -935,11 +1356,19 @@ class PygameArenaWindow:
         """Spawn a poison blob projectile thrown from the serpent's head."""
 
         hx, hy = head_pos
-        # Aim at a random arena tile (avoid the very edges).
-        target_col = random.uniform(2.0, GRID_COLS - 3.0)
-        target_row = random.uniform(1.5, GRID_ROWS - 1.5)
-        target_x = self.arena_x + target_col * TILE_SIZE
-        target_y = self.arena_y + target_row * TILE_SIZE
+        if self._server_throw_target is not None:
+            target_x, target_y = self._server_throw_target
+            self._server_throw_target = None
+        else:
+            # Cosmetic throw: no server target queued (pre-match or outside a match).
+            target_col = random.uniform(2.0, GRID_COLS - 3.0)
+            target_row = random.uniform(1.5, GRID_ROWS - 1.5)
+            target_x = self.arena_x + target_col * TILE_SIZE
+            target_y = self.arena_y + target_row * TILE_SIZE
+
+        # Capture throw data so the blob can send spawn_pie on landing.
+        throw_data = self._server_throw_data
+        self._server_throw_data = None
 
         # Compute initial velocity for a parabolic arc to that target.
         flight_time = random.uniform(0.95, 1.25)
@@ -963,6 +1392,7 @@ class PygameArenaWindow:
             "splat_at": 0,
             "splat_x": 0.0,
             "splat_y": 0.0,
+            "throw_data": throw_data,  # server target info; None for cosmetic throws
         })
 
     # ---- big serpent rendering ---------------------------------------
@@ -1031,6 +1461,24 @@ class PygameArenaWindow:
         state = self._throw_state
         sp = self._throw_progress(ticks)
 
+        if self._draw_dj_serpent_idle(ticks, state, sp):
+            return
+
+        # Keep serpent and throw timing active in all quality modes so gameplay
+        # events (blob landings/pie spawns) stay deterministic.
+        self._update_serpent_agent(self._step_dt)
+
+        if self.low_quality_mode:
+            head_x = float(self._serpent_agent["x"])
+            head_y = float(self._serpent_agent["y"])
+            head_angle = float(self._serpent_agent["angle"])
+            dir_x = math.cos(head_angle)
+            dir_y = math.sin(head_angle)
+            if state == "throw" and not self._throw_blob_spawned and sp >= 0.42:
+                self._spawn_blob_from_head((head_x, head_y), (dir_x, dir_y))
+                self._throw_blob_spawned = True
+            return
+
         # Compute head_y_offset (positive = head goes DOWN, negative = UP)
         # and forward_extend (positive = head reaches further along its trail).
         y_offset = 0.0
@@ -1054,8 +1502,7 @@ class PygameArenaWindow:
         gap_y = self.arena_y - ext_h + 16
         gap_h = ext_h - 30
 
-        # Move the serpent agent and sample body positions via arc-length.
-        self._update_serpent_agent(self._step_dt)
+        # Sample body positions via arc-length.
         num_seg = 45
         raw_pts = self._sample_arc_positions(self._serpent_agent["history"], num_seg, 14.0)
         # Reverse so index 0 = tail and index -1 = head — matches original draw order.
@@ -1244,6 +1691,7 @@ class PygameArenaWindow:
         ticks = pygame.time.get_ticks()
         dt = self._step_dt
         gravity = 780.0
+        minimal = self.low_quality_mode
 
         survivors: list[dict] = []
         for blob in self._poison_blobs:
@@ -1251,7 +1699,13 @@ class PygameArenaWindow:
                 # Splat fades out over ~450 ms.
                 age = ticks - blob["splat_at"]
                 if age < 450:
-                    self._draw_splat(blob, age)
+                    if minimal:
+                        sx = int(blob["splat_x"])
+                        sy = int(blob["splat_y"])
+                        splat_r = int(10 + 14 * (age / 450.0))
+                        pygame.draw.circle(self.screen, (70, 190, 55), (sx, sy), max(2, splat_r), 1)
+                    else:
+                        self._draw_splat(blob, age)
                     survivors.append(blob)
                 continue
 
@@ -1265,15 +1719,11 @@ class PygameArenaWindow:
                 blob["splat_at"] = ticks
                 blob["splat_x"] = blob["x"]
                 blob["splat_y"] = blob["target_y"]
-                # Blob landing spawns a collectible health berry — only on valid island tiles.
-                gcol = int((blob["x"] - self.game_origin_x) / GAME_CELL_W)
-                grow = int((blob["target_y"] - self.game_origin_y) / GAME_CELL_H)
-                if not self._is_out_of_bounds(gcol, grow):
-                    cell = (gcol, grow)
-                    occupied = (set(self.game_obstacles) | set(self.snake_a)
-                                | set(self.snake_b) | set(self.game_pies))
-                    if cell not in occupied:
-                        self.game_pies.append(cell)
+                td = blob.get("throw_data")
+                if td:
+                    self._send_blob_pie_spawn(
+                        cell_x=td["x"], cell_y=td["y"], kind=td["kind"]
+                    )
                 survivors.append(blob)
                 continue
             if blob["x"] < -60 or blob["x"] > WINDOW_WIDTH + 60 or blob["y"] > WINDOW_HEIGHT + 60:
@@ -1283,30 +1733,34 @@ class PygameArenaWindow:
             wob = math.sin(ticks / 80.0 + blob["wobble"])
             r = 11 + int(2 * wob)
 
-            # Trailing droplets (drawn behind the blob).
-            for ti in range(3):
-                trail_dt = -0.045 * (ti + 1)
-                tx_ = blob["x"] + blob["vx"] * trail_dt
-                ty_ = blob["y"] + blob["vy"] * trail_dt - 0.5 * gravity * trail_dt * trail_dt
-                tr = max(2, r - 3 - ti * 2)
-                ta = 170 - ti * 50
-                ts = pygame.Surface((tr * 4 + 2, tr * 4 + 2), pygame.SRCALPHA)
-                tc = tr * 2 + 1
-                pygame.draw.circle(ts, (60, 200, 40, ta), (tc, tc), tr)
-                self.screen.blit(ts, (int(tx_) - tc, int(ty_) - tc))
+            if minimal:
+                pygame.draw.circle(self.screen, (24, 92, 18), (bx, by), r + 1)
+                pygame.draw.circle(self.screen, (75, 205, 55), (bx, by), max(3, r - 2))
+            else:
+                # Trailing droplets (drawn behind the blob).
+                for ti in range(3):
+                    trail_dt = -0.045 * (ti + 1)
+                    tx_ = blob["x"] + blob["vx"] * trail_dt
+                    ty_ = blob["y"] + blob["vy"] * trail_dt - 0.5 * gravity * trail_dt * trail_dt
+                    tr = max(2, r - 3 - ti * 2)
+                    ta = 170 - ti * 50
+                    ts = pygame.Surface((tr * 4 + 2, tr * 4 + 2), pygame.SRCALPHA)
+                    tc = tr * 2 + 1
+                    pygame.draw.circle(ts, (60, 200, 40, ta), (tc, tc), tr)
+                    self.screen.blit(ts, (int(tx_) - tc, int(ty_) - tc))
 
-            # Outer glow.
-            gs = pygame.Surface((r * 4 + 8, r * 4 + 8), pygame.SRCALPHA)
-            gc = r * 2 + 4
-            pygame.draw.circle(gs, (60, 220, 40, 70),  (gc, gc), r + 7)
-            pygame.draw.circle(gs, (90, 255, 60, 110), (gc, gc), r + 3)
-            self.screen.blit(gs, (bx - gc, by - gc))
+                # Outer glow.
+                gs = pygame.Surface((r * 4 + 8, r * 4 + 8), pygame.SRCALPHA)
+                gc = r * 2 + 4
+                pygame.draw.circle(gs, (60, 220, 40, 70),  (gc, gc), r + 7)
+                pygame.draw.circle(gs, (90, 255, 60, 110), (gc, gc), r + 3)
+                self.screen.blit(gs, (bx - gc, by - gc))
 
-            # Body layers.
-            pygame.draw.circle(self.screen, (16, 58, 10),    (bx, by),         r + 2)
-            pygame.draw.circle(self.screen, (40, 138, 28),   (bx, by),         r)
-            pygame.draw.circle(self.screen, (110, 220, 70),  (bx - 2, by - 2), max(2, r - 4))
-            pygame.draw.circle(self.screen, (220, 255, 200), (bx - 3, by - 3), max(1, r - 8))
+                # Body layers.
+                pygame.draw.circle(self.screen, (16, 58, 10),    (bx, by),         r + 2)
+                pygame.draw.circle(self.screen, (40, 138, 28),   (bx, by),         r)
+                pygame.draw.circle(self.screen, (110, 220, 70),  (bx - 2, by - 2), max(2, r - 4))
+                pygame.draw.circle(self.screen, (220, 255, 200), (bx - 3, by - 3), max(1, r - 8))
 
             survivors.append(blob)
 
@@ -1335,6 +1789,16 @@ class PygameArenaWindow:
         game_obstacles uses the server's 20×20 grid, so the art sits exactly
         where collision is checked — snakes cannot visually walk through them.
         """
+
+        if self.low_quality_mode:
+            radius = max(4, int(GAME_CELL_H * 0.28))
+            for gcol, grow in self.game_obstacles:
+                px, py = self._game_to_pixel(gcol, grow)
+                cx = int(px)
+                cy = int(py)
+                pygame.draw.circle(self.screen, (30, 40, 30), (cx, cy), radius + 2)
+                pygame.draw.circle(self.screen, (150, 70, 55), (cx, cy), radius)
+            return
 
         ticks = pygame.time.get_ticks()
 
@@ -1519,6 +1983,9 @@ class PygameArenaWindow:
         head via a position-history deque, giving completely natural trailing
         motion regardless of how the head turns.
         """
+
+        if self.low_quality_mode:
+            return
 
         ticks = pygame.time.get_ticks()
         dt = self._step_dt
@@ -1831,12 +2298,23 @@ class PygameArenaWindow:
             self.incoming_queue.put(msg)
 
     def _drain_incoming_queue(self) -> None:
+        latest_game_state: dict | None = None
         while True:
             try:
                 msg = self.incoming_queue.get_nowait()
             except queue.Empty:
                 break
+            if msg.get("type") == MessageType.GAME_STATE.value:
+                # Keep only the newest authoritative state per frame. This avoids
+                # visual/network backlog that can look like collision lag.
+                latest_game_state = msg
+                continue
+            if latest_game_state is not None:
+                self._handle_server_message(latest_game_state)
+                latest_game_state = None
             self._handle_server_message(msg)
+        if latest_game_state is not None:
+            self._handle_server_message(latest_game_state)
 
     def _handle_server_message(self, message: dict) -> None:
         msg_type = message.get("type")
@@ -1848,6 +2326,22 @@ class PygameArenaWindow:
 
         if msg_type == MessageType.ONLINE_USERS.value:
             self.online_users = list(payload.get("users", []))
+            active_matches_payload = payload.get("active_matches", [])
+            parsed_active_matches: list[dict[str, object]] = []
+            if isinstance(active_matches_payload, list):
+                for item in active_matches_payload:
+                    if not isinstance(item, dict):
+                        continue
+                    game_id = str(item.get("game_id", "")).strip()
+                    players_raw = item.get("players", [])
+                    if not game_id or not isinstance(players_raw, list) or len(players_raw) < 2:
+                        continue
+                    p1 = str(players_raw[0]).strip()
+                    p2 = str(players_raw[1]).strip()
+                    if not p1 or not p2:
+                        continue
+                    parsed_active_matches.append({"game_id": game_id, "players": [p1, p2]})
+            self.active_matches = parsed_active_matches
             self.username_confirmed = any(
                 u.casefold() == self.username.casefold() for u in self.online_users
             )
@@ -1877,6 +2371,7 @@ class PygameArenaWindow:
                 return
             if action == "match_started":
                 self.active_game_id = payload.get("game_id")
+                self._timer_anchor_ms = pygame.time.get_ticks()
                 self.pending_invite_to = None
                 self._reset_local_round_layout()
                 skins_payload = payload.get("skins", {})
@@ -1884,20 +2379,31 @@ class PygameArenaWindow:
                     for name, raw in skins_payload.items():
                         if isinstance(raw, dict):
                             self.skin_by_username[str(name)] = sanitize_skin(raw)
-                # Ensure our local skin stays authoritative for self-render
-                self.skin_by_username[self.username] = self.local_skin
-                self.snake_a_skin = self.skin_by_username.get(self.username, SnakeSkin())
-                opponent_name = next(
-                    (n for n in self.skin_by_username if n.casefold() != self.username.casefold()),
-                    None,
-                )
-                if opponent_name is not None:
-                    self.snake_b_skin = self.skin_by_username[opponent_name]
+                if self.spectator_mode:
+                    if self.match_players is not None:
+                        p1, p2 = self.match_players
+                        self.snake_a_skin = self.skin_by_username.get(p1, self.snake_a_skin)
+                        self.snake_b_skin = self.skin_by_username.get(p2, self.snake_b_skin)
+                else:
+                    # Ensure our local skin stays authoritative only for player view.
+                    self.skin_by_username[self.username] = self.local_skin
+                    self.snake_a_skin = self.skin_by_username.get(self.username, SnakeSkin())
+                    opponent_name = next(
+                        (n for n in self.skin_by_username if n.casefold() != self.username.casefold()),
+                        None,
+                    )
+                    if opponent_name is not None:
+                        self.snake_b_skin = self.skin_by_username[opponent_name]
                 self.last_server_message = f"Match started ({self.active_game_id})"
+                self._play_game_sound()
                 return
             if action == "spectate_joined":
-                self.active_game_id = payload.get("game_id", self.active_game_id)
+                joined_game_id = str(payload.get("game_id", self.active_game_id or "")).strip() or self.active_game_id
+                self.active_game_id = joined_game_id
+                if self._timer_anchor_ms is None:
+                    self._timer_anchor_ms = pygame.time.get_ticks()
                 self.pending_spectate_to = None
+                self.pending_spectate_game_id = None
                 return
             if action in {"declined", "cancelled"}:
                 self.pending_invite_to = None
@@ -1907,6 +2413,8 @@ class PygameArenaWindow:
             self.active_game_id = payload.get("game_id", self.active_game_id)
             state = payload.get("state", {})
             self._sync_from_game_state(state)
+            if not self.has_authoritative_state:
+                self._play_game_sound()
             self.has_authoritative_state = True
             self.last_server_message = "Game state updated"
             return
@@ -1934,6 +2442,7 @@ class PygameArenaWindow:
             if "invitation" in low or "busy" in low or "offline" in low:
                 self.pending_invite_to  = None
                 self.pending_spectate_to = None
+                self.pending_spectate_game_id = None
                 if self.spectator_mode:
                     self._maybe_request_spectate()
                 else:
@@ -1942,6 +2451,23 @@ class PygameArenaWindow:
 
         if msg_type == "socket_error":
             self._mark_connection_issue(str(payload.get("message", "Lost connection.")))
+
+    def _play_game_sound(self) -> None:
+        if self._game_sound_started:
+            return
+        self._game_sound_started = True
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            game_file = SOUNDS_DIR / "game sound.mpeg"
+            if game_file.exists():
+                pygame.mixer.music.stop()
+                pygame.mixer.music.load(str(game_file))
+                pygame.mixer.music.play(-1)
+            else:
+                print(f"[audio] game sound not found: {game_file}")
+        except Exception as exc:
+            print(f"[audio] _play_game_sound failed: {exc}")
 
     def _mark_connection_issue(self, message: str) -> None:
         self.connection_healthy  = False
@@ -1982,21 +2508,63 @@ class PygameArenaWindow:
             return
         if self.pending_spectate_to is not None:
             return
-        targets = [u for u in self.online_users if u.casefold() != self.username.casefold()]
-        if not targets:
+        if not self.active_matches:
             return
-        preferred = self.preferred_opponent
+        preferred = (self.preferred_opponent or "").strip().casefold()
+        chosen_match: dict[str, object] | None = None
         if preferred:
-            target = next((u for u in targets if u.casefold() == preferred.casefold()), None)
-            if target is None:
-                return
-        else:
-            target = targets[0]
+            for match in self.active_matches:
+                players = match.get("players", [])
+                if not isinstance(players, list):
+                    continue
+                if any(str(player).casefold() == preferred for player in players):
+                    chosen_match = match
+                    break
+        if chosen_match is None:
+            chosen_match = self.active_matches[-1]
+
+        players = chosen_match.get("players", [])
+        if not isinstance(players, list) or len(players) < 2:
+            return
+        game_id = str(chosen_match.get("game_id", "")).strip() or None
+        if game_id is None:
+            return
+        target = next(
+            (str(player) for player in players if str(player).casefold() != self.username.casefold()),
+            str(players[0]),
+        )
         self.connection.send_message(
-            make_invitation_message(from_user=self.username, to_user=target, action="spectate")
+            make_invitation_message(from_user=self.username, to_user=target, action="spectate", game_id=game_id)
         )
         self.pending_spectate_to    = target
-        self.last_server_message    = f"Spectating {target}..."
+        self.pending_spectate_game_id = game_id
+        self.last_server_message    = f"Spectating {target} ({game_id})..."
+
+    def _is_primary_match_client(self) -> bool:
+        if not self.match_players:
+            return False
+        p1, p2 = self.match_players
+        primary = min((p1, p2), key=str.casefold)
+        return self.username.casefold() == primary.casefold()
+
+    def _send_blob_pie_spawn(self, *, cell_x: int, cell_y: int, kind: str) -> None:
+        if self.connection is None or self.active_game_id is None:
+            return
+        if self.spectator_mode:
+            return
+        msg = make_invitation_message(
+            from_user=self.username,
+            to_user=self.username,
+            action="spawn_pie",
+            game_id=self.active_game_id,
+        )
+        msg["payload"]["x"] = int(cell_x)
+        msg["payload"]["y"] = int(cell_y)
+        msg["payload"]["kind"] = kind
+        try:
+            self.connection.send_message(msg)
+        except OSError:
+            pass
 
     # ==================================================================
     # Gameplay: state sync + interpolation
@@ -2005,7 +2573,17 @@ class PygameArenaWindow:
     def _sync_from_game_state(self, state: dict) -> None:
         old_a = list(self.snake_a)
         old_b = list(self.snake_b)
+        skins_payload = state.get("skins", {})
+        if isinstance(skins_payload, dict):
+            for name, raw in skins_payload.items():
+                if isinstance(raw, dict):
+                    self.skin_by_username[str(name)] = sanitize_skin(raw)
         snakes = state.get("snakes", [])
+        if len(snakes) >= 2:
+            n1 = str(snakes[0].get("player", "")).strip()
+            n2 = str(snakes[1].get("player", "")).strip()
+            if n1 and n2:
+                self.match_players = (n1, n2)
         my_snake = None
         opp_snake = None
 
@@ -2038,35 +2616,41 @@ class PygameArenaWindow:
 
         if my_snake is not None:
             self.player_a_name = str(my_snake.get("player", self.player_a_name))
+            skin_raw = my_snake.get("skin")
+            if isinstance(skin_raw, dict):
+                self.skin_by_username[self.player_a_name] = sanitize_skin(skin_raw)
             body = my_snake.get("body", [])
             if body:
                 self.snake_a = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_a_health = int(my_snake.get("health", self.snake_a_health))
-            self.snake_a_skin = self.skin_by_username.get(self.player_a_name, self.local_skin)
+            fallback_a = SnakeSkin() if self.spectator_mode else self.local_skin
+            self.snake_a_skin = self.skin_by_username.get(self.player_a_name, fallback_a)
 
         if opp_snake is not None:
             self.player_b_name = str(opp_snake.get("player", self.player_b_name))
+            skin_raw = opp_snake.get("skin")
+            if isinstance(skin_raw, dict):
+                self.skin_by_username[self.player_b_name] = sanitize_skin(skin_raw)
             body = opp_snake.get("body", [])
             if body:
                 self.snake_b = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_b_health = int(opp_snake.get("health", self.snake_b_health))
-            self.snake_b_skin = self.skin_by_username.get(self.player_b_name, self.snake_b_skin)
+            fallback_b = SnakeSkin() if self.spectator_mode else self.snake_b_skin
+            self.snake_b_skin = self.skin_by_username.get(self.player_b_name, fallback_b)
 
         pies_raw = state.get("pies", [])
-        if pies_raw:
-            self.game_pies = [
-                (px, py)
-                for p in pies_raw
-                for px, py in [(
-                    int(p.get("position", {}).get("x", 0)),
-                    int(p.get("position", {}).get("y", 0)),
-                )]
-                if not self._is_out_of_bounds(px, py)
-            ]
-
-        # Blob-spawned pies live only on the client — the server's authoritative
-        # snake update won't remove them. Consume any pie a snake head just moved onto.
-        self._consume_local_pies_on_heads()
+        parsed_pies: dict[tuple[int, int], str] = {}
+        for p in pies_raw:
+            pos = p.get("position", {})
+            px = int(pos.get("x", 0))
+            py = int(pos.get("y", 0))
+            if self._is_out_of_bounds(px, py):
+                continue
+            kind = str(p.get("kind", "green")).strip().lower()
+            if kind not in {"green", "yellow", "red"}:
+                kind = "green"
+            parsed_pies[(px, py)] = kind
+        self.game_pies = parsed_pies
 
         obs_raw = state.get("obstacles", [])
         if obs_raw:
@@ -2076,23 +2660,79 @@ class PygameArenaWindow:
             ]
 
         timer = state.get("timer", {})
+        self.timer_total = int(timer.get("total_seconds", self.timer_total))
         self.timer_remaining = int(timer.get("remaining_seconds", self.timer_remaining))
         self.timer_elapsed   = int(timer.get("elapsed_seconds",   self.timer_elapsed))
+        if self.timer_elapsed > 0:
+            self._timer_anchor_ms = pygame.time.get_ticks() - int(self.timer_elapsed * 1000)
         self.match_status    = str(state.get("status", self.match_status))
         self.match_winner    = str(state.get("winner") or self.match_winner)
         self.countdown_ticks = int(state.get("countdown", 0))
-        self._start_state_interpolation(old_a, old_b)
+
+        # When the server announces a new throw target, queue it for the next blob.
+        throw_target = state.get("throw_target")
+        if throw_target:
+            tid = int(throw_target.get("id", -1))
+            if tid != self._last_throw_target_id:
+                self._last_throw_target_id = tid
+                tx = int(throw_target.get("x", 0))
+                ty = int(throw_target.get("y", 0))
+                px, py = self._game_to_pixel(tx, ty)
+                self._server_throw_target = (float(px), float(py))
+                self._server_throw_data = throw_target
+                # Trigger immediately if idle; otherwise it fires on next idle transition.
+                if self._throw_state == "idle":
+                    self._throw_state = "wind_up"
+                    self._throw_state_start = pygame.time.get_ticks()
+                    self._throw_blob_spawned = False
+
+        if self.spectator_mode:
+            self.render_snake_a = [(float(x), float(y)) for x, y in self.snake_a]
+            self.render_snake_b = [(float(x), float(y)) for x, y in self.snake_b]
+            self.interp_from_snake_a = []
+            self.interp_from_snake_b = []
+            self.interp_to_snake_a = []
+            self.interp_to_snake_b = []
+            self.state_interp_start_ms = 0
+        else:
+            self._start_state_interpolation(old_a, old_b)
 
     def _start_state_interpolation(self, old_a: list, old_b: list) -> None:
         def to_float(cells: list) -> list:
             return [(float(x), float(y)) for x, y in cells]
 
+        def _should_snap(old_cells: list, new_cells: list) -> bool:
+            if not old_cells or not new_cells:
+                return True
+            ox, oy = old_cells[0]
+            nx, ny = new_cells[0]
+            head_step = abs(int(nx) - int(ox)) + abs(int(ny) - int(oy))
+            # Snap when the head did not advance (common on obstacle/wall hits)
+            # or when a large correction happens (desync recovery/teleport).
+            return head_step == 0 or head_step > 1
+
         to_a = to_float(self.snake_a)
         to_b = to_float(self.snake_b)
-        from_a = (list(self.render_snake_a) if len(self.render_snake_a) == len(to_a) and self.render_snake_a
-                  else to_float(old_a or self.snake_a))
-        from_b = (list(self.render_snake_b) if len(self.render_snake_b) == len(to_b) and self.render_snake_b
-                  else to_float(old_b or self.snake_b))
+        snap_a = _should_snap(old_a, self.snake_a)
+        snap_b = _should_snap(old_b, self.snake_b)
+        from_a = (
+            list(to_a)
+            if snap_a
+            else (
+                list(self.render_snake_a)
+                if len(self.render_snake_a) == len(to_a) and self.render_snake_a
+                else to_float(old_a or self.snake_a)
+            )
+        )
+        from_b = (
+            list(to_b)
+            if snap_b
+            else (
+                list(self.render_snake_b)
+                if len(self.render_snake_b) == len(to_b) and self.render_snake_b
+                else to_float(old_b or self.snake_b)
+            )
+        )
         if len(from_a) != len(to_a):
             from_a = list(to_a)
         if len(from_b) != len(to_b):
@@ -2188,35 +2828,13 @@ class PygameArenaWindow:
 
     def _reset_local_round_layout(self) -> None:
         self.game_obstacles = list(STATIC_OBSTACLES_GAME)
-        self.game_pies = []  # berries come only from serpent blob landings
-
-    def _consume_local_pies_on_heads(self) -> None:
-        """Remove any blob-spawned pie that sits under a snake head and heal locally.
-
-        Needed because blob pies are client-only; the server's snake step won't
-        flag them as eaten, so without this they'd phase right through the snake.
-        """
-
-        if not self.game_pies:
-            return
-        pies = set(self.game_pies)
-        eaten: set[tuple[int, int]] = set()
-        if self.snake_a:
-            head_a = self.snake_a[0]
-            if head_a in pies:
-                eaten.add(head_a)
-                self.snake_a_health += PIE_HEALTH_GAIN
-        if self.snake_b:
-            head_b = self.snake_b[0]
-            if head_b in pies:
-                eaten.add(head_b)
-                self.snake_b_health += PIE_HEALTH_GAIN
-        if eaten:
-            self.game_pies = [p for p in self.game_pies if p not in eaten]
+        self.game_pies = {}
 
     def _adjust_snake_length(self, snake_cells: list, health: int) -> None:
-        growth = max(0, (health - LOCAL_INITIAL_HEALTH) // HEALTH_PER_GROWTH_SEGMENT)
-        target = BASE_SNAKE_LENGTH + growth
+        if health <= 0:
+            target = 1
+        else:
+            target = max(1, int(round((BASE_SNAKE_LENGTH * float(health)) / float(LOCAL_INITIAL_HEALTH))))
         if len(snake_cells) > target:
             del snake_cells[target:]
         elif len(snake_cells) < target and snake_cells:
@@ -2253,8 +2871,16 @@ class PygameArenaWindow:
         ate = next_head in self.game_pies
         snake_cells.insert(0, next_head)
         if ate:
-            health += PIE_HEALTH_GAIN
-            self.game_pies.remove(next_head)
+            pie_kind = self.game_pies.pop(next_head, "green")
+            if pie_kind == "green":
+                health += PIE_HEALTH_GAIN
+            elif pie_kind == "red":
+                health = max(0, health - PIE_DAMAGE)
+            elif pie_kind == "yellow":
+                if health_attr == "snake_a_health":
+                    self.snake_b_health = max(0, self.snake_b_health - PIE_DAMAGE)
+                else:
+                    self.snake_a_health = max(0, self.snake_a_health - PIE_DAMAGE)
         else:
             snake_cells.pop()
         self._adjust_snake_length(snake_cells, health)
@@ -2311,19 +2937,38 @@ class PygameArenaWindow:
 
     def _draw_game_pies(self) -> None:
         ticks = pygame.time.get_ticks()
-        for col, row in self.game_pies:
+        minimal = self.low_quality_mode
+        for (col, row), kind in self.game_pies.items():
             cx, cy = self._game_to_pixel(col, row)
             cx, cy = int(cx), int(cy)
             pulse = 0.7 + 0.3 * math.sin(ticks / 400.0 + col * 0.7 + row * 1.3)
             r = max(4, int(GAME_CELL_H * 0.4 - 1 + 2 * pulse))
-            # Glow
-            gs = pygame.Surface((r * 4 + 4, r * 4 + 4), pygame.SRCALPHA)
-            pygame.draw.circle(gs, (*BERRY_COLOR, int(75 * pulse)), (r * 2 + 2, r * 2 + 2), r + 5)
-            self.screen.blit(gs, (cx - r * 2 - 2, cy - r * 2 - 2))
+            if kind == "yellow":
+                body = (255, 220, 30)
+                highlight = (255, 252, 190)
+                glow = (255, 235, 60)
+                rim = (90, 60, 0)
+            elif kind == "red":
+                body = (255, 36, 36)
+                highlight = (255, 216, 210)
+                glow = (255, 78, 78)
+                rim = (70, 0, 0)
+            else:
+                body = BERRY_COLOR
+                highlight = (240, 255, 200)
+                glow = BERRY_COLOR
+                rim = (25, 90, 15)
+            if not minimal:
+                # Glow
+                gs = pygame.Surface((r * 4 + 4, r * 4 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(gs, (*glow, int(105 * pulse)), (r * 2 + 2, r * 2 + 2), r + 6)
+                self.screen.blit(gs, (cx - r * 2 - 2, cy - r * 2 - 2))
             # Berry body
-            pygame.draw.circle(self.screen, (25, 90, 15),   (cx, cy), r + 1)
-            pygame.draw.circle(self.screen, BERRY_COLOR,    (cx, cy), r)
-            pygame.draw.circle(self.screen, (240, 255, 200), (cx - r // 3, cy - r // 3), max(2, r // 3))
+            pygame.draw.circle(self.screen, rim, (cx, cy), r + 1)
+            pygame.draw.circle(self.screen, body, (cx, cy), r)
+            pygame.draw.circle(self.screen, highlight, (cx - r // 3, cy - r // 3), max(2, r // 3))
+            if kind in {"yellow", "red"}:
+                pygame.draw.circle(self.screen, (252, 252, 252), (cx, cy), r + 2, 1)
 
     def _draw_countdown_overlay(self) -> None:
         """Render a centred 3-2-1 / GO! overlay while the game is frozen."""
@@ -2421,10 +3066,18 @@ class PygameArenaWindow:
 
         # ── Timer — centre ───────────────────────────────────────────
         cx = WINDOW_WIDTH // 2
-        if self.has_authoritative_state and self.timer_remaining > 0:
-            t_str = f"{self.timer_remaining // 60}:{self.timer_remaining % 60:02d}"
+        if self.has_authoritative_state and (self.timer_remaining > 0 or self.timer_elapsed > 0):
+            remaining = self.timer_remaining
+            if remaining <= 0 and self.timer_elapsed > 0:
+                remaining = max(0, int(self.timer_total) - int(self.timer_elapsed))
+            t_str = f"{remaining // 60}:{remaining % 60:02d}"
         elif self.active_game_id:
-            t_str = "—"
+            if self._timer_anchor_ms is not None:
+                local_elapsed = max(0, int((pygame.time.get_ticks() - self._timer_anchor_ms) / 1000))
+                remaining = max(0, int(self.timer_total) - local_elapsed)
+                t_str = f"{remaining // 60}:{remaining % 60:02d}"
+            else:
+                t_str = f"{int(self.timer_total) // 60}:{int(self.timer_total) % 60:02d}"
         else:
             t_str = "lobby"
         t_surf = self.font_hud.render(t_str, True, HUD_ACCENT)
@@ -2433,7 +3086,10 @@ class PygameArenaWindow:
         # ── Chat overlay — bottom of screen ─────────────────────────
         msgs = list(self.chat_messages)[-4:]
         if msgs or self.chat_typing:
-            lines = msgs + ([f"> {self.chat_input}_"] if self.chat_typing else [])
+            typing_line = f"> {self.chat_input}"
+            if self.chat_typing and (pygame.time.get_ticks() // 420) % 2 == 0:
+                typing_line = f"> {self.chat_input[: self.chat_cursor]}|{self.chat_input[self.chat_cursor :]}"
+            lines = msgs + ([typing_line] if self.chat_typing else [])
             ch = len(lines) * 18 + 8
             cy_chat = WINDOW_HEIGHT - ch - 4
             bg = pygame.Surface((620, ch), pygame.SRCALPHA)

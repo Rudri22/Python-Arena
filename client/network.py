@@ -35,6 +35,10 @@ class ClientConnection:
             (server_ip, server_port),
             timeout=connect_timeout_seconds,
         )
+        try:
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
         # Restore blocking mode after connect so receive loop behaves normally.
         self.socket.settimeout(None)

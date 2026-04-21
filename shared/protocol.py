@@ -118,12 +118,28 @@ SKIN_COLORS: dict[str, tuple[int, int, int]] = {
     "bone":   (226, 218, 196),
     "dirt":   (150, 110, 70),
     "dusk":   (95, 70, 140),
+    "ocean":  (72, 166, 238),
+    "coral":  (250, 120, 116),
+    "mint":   (122, 246, 196),
+    "onyx":   (68, 74, 92),
 }
 
-PATTERNS: tuple[str, ...] = ("solid", "scales", "stripes", "diamond", "speckled")
-HATS: tuple[str, ...] = ("none", "helmet", "crown", "wizard", "jester")
-TAILS: tuple[str, ...] = ("none", "rattle", "spike", "flame")
-EYE_STYLES: tuple[str, ...] = ("normal", "fierce", "glow", "visor")
+# Texture selection is intentionally disabled in the lobby UI.
+# Keep `pattern` in the protocol for wire/backward compatibility, but only
+# permit the neutral solid style.
+PATTERNS: tuple[str, ...] = ("solid",)
+HATS: tuple[str, ...] = (
+    "none",
+    "helmet",
+    "crown",
+    "wizard",
+    "jester",
+    "bandana",
+    "beanie",
+    "horns",
+)
+TAILS: tuple[str, ...] = ("none", "rattle", "spike", "flame", "fin", "club", "leaf")
+EYE_STYLES: tuple[str, ...] = ("normal", "fierce", "glow", "visor", "sleepy", "star", "cyber")
 
 
 def sanitize_skin(raw: dict | None) -> SnakeSkin:
@@ -255,7 +271,7 @@ def serialize_message(message: dict[str, Any]) -> str:
     """
 
     validate_message(message)
-    return json.dumps(message)
+    return json.dumps(message, separators=(",", ":"), ensure_ascii=False)
 
 
 def parse_message(raw_message: str) -> dict[str, Any]:
