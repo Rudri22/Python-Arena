@@ -98,7 +98,7 @@ class TimerState:
 class SnakeSkin:
     """Per-player cosmetic appearance chosen in the lobby."""
 
-    color: str = "venom"
+    color: str = "none"
     pattern: str = "solid"
     hat: str = "none"
     tail: str = "none"
@@ -106,6 +106,7 @@ class SnakeSkin:
 
 
 SKIN_COLORS: dict[str, tuple[int, int, int]] = {
+    "none":   (76, 246, 132),
     "venom":  (76, 246, 132),
     "moss":   (72, 140, 72),
     "rot":    (158, 196, 60),
