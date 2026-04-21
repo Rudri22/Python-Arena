@@ -621,11 +621,21 @@ def _handle_emote_message(
         return
 
     msg = make_emote_message(sender=sender_username, emote=emote, game_id=resolved_game_id)
+    sender_socket = server_state.get_socket_for_username(sender_username)
+    delivered_to_sender = False
     for sock in server_state.get_match_session_sockets(resolved_game_id):
+        if sender_socket is not None and sock is sender_socket:
+            delivered_to_sender = True
         try:
             send_message(sock, msg)
         except OSError:
             continue
+    # Keep sender feedback reliable even if participant mapping is temporarily stale.
+    if sender_socket is not None and not delivered_to_sender:
+        try:
+            send_message(sender_socket, msg)
+        except OSError:
+            pass
 
 
 def handle_incoming_message(

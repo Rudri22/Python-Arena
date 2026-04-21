@@ -97,7 +97,11 @@ EMOTE_DISPLAY_MS = 3000
 EMOTE_ICON_SIZE = 70
 EMOTE_NAMES = ("heheheha", "grrr", "cry")
 EMOTE_KEYS = {pygame.K_1: "heheheha", pygame.K_2: "grrr", pygame.K_3: "cry"}
+EMOTE_KEY_LABELS = {name: str(idx + 1) for idx, name in enumerate(EMOTE_NAMES)}
 EMOTE_COOLDOWN_MS = 2000
+SPECTATOR_EMOTE_BUTTON_SIZE = 44
+SPECTATOR_EMOTE_BUTTON_GAP = 10
+SPECTATOR_EMOTE_BUTTON_MARGIN = 10
 
 _DIRECTIONS: dict[str, tuple[int, int]] = {
     "up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0),
@@ -365,6 +369,7 @@ class PygameArenaWindow:
         self._load_emote_assets()
         self._left_emote: dict | None = None   # {image, expires_ms}
         self._right_emote: dict | None = None
+        self._crowd_emote: dict | None = None
         self._last_emote_ms = 0
 
         # ── Fonts ──────────────────────────────────────────────────────
@@ -1147,6 +1152,8 @@ class PygameArenaWindow:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._handle_mouse_click(event.pos)
             elif event.type == pygame.KEYDOWN:
                 if self._handle_chat_key(event):
                     continue
@@ -1171,6 +1178,14 @@ class PygameArenaWindow:
                 elif event.key in EMOTE_KEYS:
                     self._send_emote(EMOTE_KEYS[event.key])
                 self._handle_direction_input(event.key)
+
+    def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
+        if not self.spectator_mode or self.show_result_screen:
+            return
+        for emote_name, button_rect in self._spectator_emote_button_rects():
+            if button_rect.collidepoint(pos):
+                self._send_emote(emote_name)
+                return
 
     def _handle_chat_key(self, event: pygame.event.Event) -> bool:
         if event.key == pygame.K_RETURN:
@@ -2501,19 +2516,7 @@ class PygameArenaWindow:
         if msg_type == MessageType.EMOTE.value:
             sender = str(payload.get("sender", ""))
             emote  = str(payload.get("emote", ""))
-            if emote in self._emote_images:
-                expires = pygame.time.get_ticks() + EMOTE_DISPLAY_MS
-                entry = {"image": self._emote_images[emote], "expires_ms": expires}
-                if sender.casefold() == self.player_a_name.casefold():
-                    self._left_emote = entry
-                else:
-                    self._right_emote = entry
-                sound = self._emote_sounds.get(emote)
-                if sound is not None:
-                    try:
-                        sound.play()
-                    except Exception:
-                        pass
+            self._show_emote_locally(sender=sender, emote=emote)
             return
 
         if msg_type == MessageType.GAME_OVER.value:
@@ -2547,7 +2550,8 @@ class PygameArenaWindow:
             if img_path.exists():
                 try:
                     raw = pygame.image.load(str(img_path)).convert_alpha()
-                    self._emote_images[name] = pygame.transform.smoothscale(raw, (EMOTE_ICON_SIZE, EMOTE_ICON_SIZE))
+                    cleaned = self._strip_near_white_background(raw)
+                    self._emote_images[name] = self._fit_emote_image(cleaned, EMOTE_ICON_SIZE)
                 except pygame.error:
                     pass
             snd_path = EMOTES_DIR / f"{name}.mp3"
@@ -2560,6 +2564,54 @@ class PygameArenaWindow:
                 except pygame.error:
                     pass
 
+    def _strip_near_white_background(self, src: pygame.Surface) -> pygame.Surface:
+        """Make near-white matte pixels transparent for cleaner emote cutouts."""
+
+        out = src.copy()
+        w, h = out.get_size()
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = out.get_at((x, y))
+                if a == 0:
+                    continue
+                if r >= 235 and g >= 235 and b >= 235:
+                    out.set_at((x, y), (r, g, b, 0))
+        return out
+
+    def _fit_emote_image(self, src: pygame.Surface, target_size: int) -> pygame.Surface:
+        """Scale emote to fit square box while preserving original aspect ratio."""
+
+        w, h = src.get_size()
+        if w <= 0 or h <= 0:
+            return pygame.Surface((target_size, target_size), pygame.SRCALPHA)
+        scale = min(target_size / float(w), target_size / float(h))
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        fitted = pygame.transform.smoothscale(src, (new_w, new_h))
+        canvas = pygame.Surface((target_size, target_size), pygame.SRCALPHA)
+        canvas.blit(fitted, ((target_size - new_w) // 2, (target_size - new_h) // 2))
+        return canvas
+
+    def _show_emote_locally(self, sender: str, emote: str) -> None:
+        if emote not in self._emote_images:
+            return
+        expires = pygame.time.get_ticks() + EMOTE_DISPLAY_MS
+        entry = {"image": self._emote_images[emote], "expires_ms": expires}
+        if sender.casefold() == self.player_a_name.casefold():
+            self._left_emote = entry
+        elif sender.casefold() == self.player_b_name.casefold():
+            self._right_emote = entry
+        else:
+            # Spectator/audience emotes get their own dedicated slot.
+            self._crowd_emote = entry
+
+        sound = self._emote_sounds.get(emote)
+        if sound is not None:
+            try:
+                sound.play()
+            except Exception:
+                pass
+
     def _send_emote(self, emote_name: str) -> None:
         if self.connection is None or self.active_game_id is None or self.show_result_screen:
             return
@@ -2567,6 +2619,8 @@ class PygameArenaWindow:
         if now - self._last_emote_ms < EMOTE_COOLDOWN_MS:
             return
         self._last_emote_ms = now
+        # Immediate local feedback so key presses feel responsive even before echo.
+        self._show_emote_locally(sender=self.username, emote=emote_name)
         try:
             self.connection.send_message(
                 make_emote_message(sender=self.username, emote=emote_name, game_id=self.active_game_id)
@@ -3219,14 +3273,71 @@ class PygameArenaWindow:
                 clr = HUD_ACCENT if (self.chat_typing and i == len(lines) - 1) else HUD_DIM
                 ls  = self.font_hud_sm.render(line[:90], True, clr)
                 self.screen.blit(ls, (self.arena_x + 14, cy_chat + 4 + i * 18))
+        self._draw_spectator_emote_buttons()
+
+    def _spectator_emote_button_rects(self) -> list[tuple[str, pygame.Rect]]:
+        count = len(EMOTE_NAMES)
+        total_w = count * SPECTATOR_EMOTE_BUTTON_SIZE + max(0, count - 1) * SPECTATOR_EMOTE_BUTTON_GAP
+        x0 = WINDOW_WIDTH - total_w - SPECTATOR_EMOTE_BUTTON_MARGIN
+        y = WINDOW_HEIGHT - SPECTATOR_EMOTE_BUTTON_SIZE - SPECTATOR_EMOTE_BUTTON_MARGIN
+        return [
+            (
+                name,
+                pygame.Rect(
+                    x0 + idx * (SPECTATOR_EMOTE_BUTTON_SIZE + SPECTATOR_EMOTE_BUTTON_GAP),
+                    y,
+                    SPECTATOR_EMOTE_BUTTON_SIZE,
+                    SPECTATOR_EMOTE_BUTTON_SIZE,
+                ),
+            )
+            for idx, name in enumerate(EMOTE_NAMES)
+        ]
+
+    def _draw_spectator_emote_buttons(self) -> None:
+        if not self.spectator_mode or self.show_result_screen:
+            return
+        now = pygame.time.get_ticks()
+        cooldown_left = max(0, EMOTE_COOLDOWN_MS - (now - self._last_emote_ms))
+        can_emit = cooldown_left <= 0
+        for emote_name, rect in self._spectator_emote_button_rects():
+            fill = (18, 26, 36, 210) if can_emit else (18, 22, 28, 180)
+            border = (90, 180, 220) if can_emit else (70, 84, 98)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=8)
+            pygame.draw.rect(self.screen, border, rect, width=2, border_radius=8)
+            icon = self._emote_images.get(emote_name)
+            if icon is not None:
+                thumb = pygame.transform.smoothscale(icon, (rect.width - 8, rect.height - 8))
+                if not can_emit:
+                    thumb.set_alpha(120)
+                self.screen.blit(thumb, (rect.x + 4, rect.y + 4))
+            else:
+                fallback = self.font_hud_sm.render(emote_name[:4].upper(), True, HUD_TEXT)
+                self.screen.blit(
+                    fallback,
+                    (rect.centerx - fallback.get_width() // 2, rect.centery - fallback.get_height() // 2),
+                )
+            key_label = EMOTE_KEY_LABELS.get(emote_name, "")
+            if key_label:
+                lbl = self.font_hud_sm.render(key_label, True, (220, 230, 240))
+                self.screen.blit(lbl, (rect.x + 3, rect.y + 2))
 
     def _draw_emotes(self) -> None:
         now = pygame.time.get_ticks()
         pad = 8
-        for emote_data, x in (
-            (self._left_emote,  pad),
-            (self._right_emote, WINDOW_WIDTH - EMOTE_ICON_SIZE - pad),
-        ):
+        if self.spectator_mode:
+            dj_y = max(44, self.arena_y - SIDE_EXTENSION_ROWS * TILE_SIZE + 30)
+            slots = (
+                (self._left_emote,  WINDOW_WIDTH // 2 - EMOTE_ICON_SIZE - 24, dj_y),
+                (self._crowd_emote, WINDOW_WIDTH // 2, dj_y),
+                (self._right_emote, WINDOW_WIDTH // 2 + 24, dj_y),
+            )
+        else:
+            slots = (
+                (self._left_emote,  pad, 40),
+                (self._crowd_emote, WINDOW_WIDTH // 2 - EMOTE_ICON_SIZE // 2, 40),
+                (self._right_emote, WINDOW_WIDTH - EMOTE_ICON_SIZE - pad, 40),
+            )
+        for emote_data, x, y in slots:
             if emote_data is None:
                 continue
             remaining_ms = emote_data["expires_ms"] - now
@@ -3237,11 +3348,11 @@ class PygameArenaWindow:
             # Dark background pill
             bg = pygame.Surface((EMOTE_ICON_SIZE + 4, EMOTE_ICON_SIZE + 4), pygame.SRCALPHA)
             bg.fill((0, 0, 0, int(170 * fade)))
-            self.screen.blit(bg, (x - 2, 38))
+            self.screen.blit(bg, (x - 2, y - 2))
             # Emote icon
             icon = emote_data["image"].copy()
             icon.set_alpha(alpha)
-            self.screen.blit(icon, (x, 40))
+            self.screen.blit(icon, (x, y))
 
     def _draw_result_screen(self) -> None:
         ticks = pygame.time.get_ticks()
