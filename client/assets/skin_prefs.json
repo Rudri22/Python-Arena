@@ -1,7 +1,7 @@
 {
-  "color": "none",
+  "color": "toxin",
   "pattern": "solid",
-  "hat": "none",
-  "tail": "none",
+  "hat": "wizard",
+  "tail": "flame",
   "eyes": "normal"
 }
