@@ -227,9 +227,23 @@ class ServerState:
         """Return the skin dict for a username, or a default skin if unset."""
 
         with self._lock:
-            client_id = self._username_to_client.get(_normalize_username(username))
-            skin = self._client_skins.get(client_id) if client_id is not None else None
-            return skin_to_dict(skin if skin is not None else SnakeSkin())
+            return self._skin_dict_for_username_locked(username)
+
+    def _skin_dict_for_username_locked(self, username: str) -> dict[str, str]:
+        """Lock-free variant for callers that already hold `_lock`."""
+
+        client_id = self._username_to_client.get(_normalize_username(username))
+        skin = self._client_skins.get(client_id) if client_id is not None else None
+        return skin_to_dict(skin if skin is not None else SnakeSkin())
+
+    def _match_skins_locked(self, players: tuple[str, str]) -> dict[str, dict[str, str]]:
+        """Build authoritative skin map for both players in one active match."""
+
+        p1, p2 = players
+        return {
+            p1: self._skin_dict_for_username_locked(p1),
+            p2: self._skin_dict_for_username_locked(p2),
+        }
 
     def get_online_users(self) -> list[str]:
         """Return all online usernames sorted for deterministic payloads."""
@@ -596,7 +610,11 @@ class ServerState:
             runtime = self._match_runtimes.get(game_id)
             if runtime is None:
                 return None
-            return to_protocol_state(runtime)
+            state = to_protocol_state(runtime)
+            players = self._active_matches.get(game_id)
+            if players is not None:
+                state["skins"] = self._match_skins_locked(players)
+            return state
 
     def process_player_movement(
         self,
@@ -696,6 +714,9 @@ class ServerState:
                     }
                     games_to_cleanup.append(game_id)
 
+                state_payload = to_protocol_state(runtime)
+                state_payload["skins"] = self._match_skins_locked(players)
+
                 updates.append(
                     {
                         "game_id": game_id,
@@ -711,7 +732,7 @@ class ServerState:
                                 ],
                             ]
                         ),
-                        "state": to_protocol_state(runtime),
+                        "state": state_payload,
                         "game_over": game_over_payload,
                     }
                 )
