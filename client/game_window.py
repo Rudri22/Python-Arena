@@ -133,14 +133,15 @@ class PygameArenaWindow:
         # Cosmetic skins chosen in the lobby; keyed by player username.
         self.local_skin: SnakeSkin = sanitize_skin(initial_skin) if initial_skin else SnakeSkin()
         self.skin_by_username: dict[str, SnakeSkin] = {}
+        self.skin_by_username_cf: dict[str, SnakeSkin] = {}
         if isinstance(initial_match_skins, dict):
             for name, raw in initial_match_skins.items():
                 if isinstance(raw, dict):
-                    self.skin_by_username[str(name)] = sanitize_skin(raw)
+                    self._remember_skin(str(name), raw)
         # Self snake always uses the locally chosen skin (ensures identity if
         # server's copy hasn't reached us yet when rendering starts).
-        self.skin_by_username.setdefault(username, self.local_skin)
-        self.snake_a_skin: SnakeSkin = self.skin_by_username.get(username, SnakeSkin())
+        self._remember_skin(username, self.local_skin)
+        self.snake_a_skin: SnakeSkin = self._skin_for_player(username, SnakeSkin())
         self.snake_b_skin: SnakeSkin = SnakeSkin()
 
         self.grid_cols = GRID_COLS
@@ -217,6 +218,7 @@ class PygameArenaWindow:
             _mk(300.0,  750.0, 0.05,           70.0, 11, 0.86, 0.3),
             _mk(850.0,  750.0, math.pi,        60.0, 12, 0.92, 2.4),
         ]
+
         del _mk, _rng_s
 
         # Poison drip particles falling from the arch serpent.
@@ -367,6 +369,44 @@ class PygameArenaWindow:
 
         self._reset_local_round_layout()
         self._connect_to_server()
+
+    def _clone_skin(self, skin: SnakeSkin) -> SnakeSkin:
+        """Return a copy so per-player skin state never shares object identity."""
+
+        return SnakeSkin(
+            color=skin.color,
+            pattern=skin.pattern,
+            hat=skin.hat,
+            tail=skin.tail,
+            eyes=skin.eyes,
+        )
+
+    def _remember_skin(self, username: str, raw_skin: SnakeSkin | dict | None) -> None:
+        """Store one player's skin in exact and casefold maps."""
+
+        name = str(username or "").strip()
+        if not name:
+            return
+        if isinstance(raw_skin, SnakeSkin):
+            parsed = self._clone_skin(raw_skin)
+        elif isinstance(raw_skin, dict):
+            parsed = sanitize_skin(raw_skin)
+        else:
+            return
+        self.skin_by_username[name] = parsed
+        self.skin_by_username_cf[name.casefold()] = parsed
+
+    def _skin_for_player(self, username: str, fallback: SnakeSkin) -> SnakeSkin:
+        """Lookup a player's skin using exact-name, then casefold fallback."""
+
+        name = str(username or "").strip()
+        if name:
+            found = self.skin_by_username.get(name)
+            if found is None:
+                found = self.skin_by_username_cf.get(name.casefold())
+            if found is not None:
+                return found
+        return fallback
 
     # ------------------------------------------------------------------
     # Castle wall loading (kept for castle_tile_texture; never drawn)
@@ -2378,22 +2418,22 @@ class PygameArenaWindow:
                 if isinstance(skins_payload, dict):
                     for name, raw in skins_payload.items():
                         if isinstance(raw, dict):
-                            self.skin_by_username[str(name)] = sanitize_skin(raw)
+                            self._remember_skin(str(name), raw)
                 if self.spectator_mode:
                     if self.match_players is not None:
                         p1, p2 = self.match_players
-                        self.snake_a_skin = self.skin_by_username.get(p1, self.snake_a_skin)
-                        self.snake_b_skin = self.skin_by_username.get(p2, self.snake_b_skin)
+                        self.snake_a_skin = self._skin_for_player(p1, self.snake_a_skin)
+                        self.snake_b_skin = self._skin_for_player(p2, self.snake_b_skin)
                 else:
                     # Ensure our local skin stays authoritative only for player view.
-                    self.skin_by_username[self.username] = self.local_skin
-                    self.snake_a_skin = self.skin_by_username.get(self.username, SnakeSkin())
+                    self._remember_skin(self.username, self.local_skin)
+                    self.snake_a_skin = self._skin_for_player(self.username, SnakeSkin())
                     opponent_name = next(
                         (n for n in self.skin_by_username if n.casefold() != self.username.casefold()),
                         None,
                     )
                     if opponent_name is not None:
-                        self.snake_b_skin = self.skin_by_username[opponent_name]
+                        self.snake_b_skin = self._skin_for_player(opponent_name, self.snake_b_skin)
                 self.last_server_message = f"Match started ({self.active_game_id})"
                 self._play_game_sound()
                 return
@@ -2577,7 +2617,7 @@ class PygameArenaWindow:
         if isinstance(skins_payload, dict):
             for name, raw in skins_payload.items():
                 if isinstance(raw, dict):
-                    self.skin_by_username[str(name)] = sanitize_skin(raw)
+                    self._remember_skin(str(name), raw)
         snakes = state.get("snakes", [])
         if len(snakes) >= 2:
             n1 = str(snakes[0].get("player", "")).strip()
@@ -2618,25 +2658,25 @@ class PygameArenaWindow:
             self.player_a_name = str(my_snake.get("player", self.player_a_name))
             skin_raw = my_snake.get("skin")
             if isinstance(skin_raw, dict):
-                self.skin_by_username[self.player_a_name] = sanitize_skin(skin_raw)
+                self._remember_skin(self.player_a_name, skin_raw)
             body = my_snake.get("body", [])
             if body:
                 self.snake_a = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_a_health = int(my_snake.get("health", self.snake_a_health))
             fallback_a = SnakeSkin() if self.spectator_mode else self.local_skin
-            self.snake_a_skin = self.skin_by_username.get(self.player_a_name, fallback_a)
+            self.snake_a_skin = self._skin_for_player(self.player_a_name, fallback_a)
 
         if opp_snake is not None:
             self.player_b_name = str(opp_snake.get("player", self.player_b_name))
             skin_raw = opp_snake.get("skin")
             if isinstance(skin_raw, dict):
-                self.skin_by_username[self.player_b_name] = sanitize_skin(skin_raw)
+                self._remember_skin(self.player_b_name, skin_raw)
             body = opp_snake.get("body", [])
             if body:
                 self.snake_b = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_b_health = int(opp_snake.get("health", self.snake_b_health))
             fallback_b = SnakeSkin() if self.spectator_mode else self.snake_b_skin
-            self.snake_b_skin = self.skin_by_username.get(self.player_b_name, fallback_b)
+            self.snake_b_skin = self._skin_for_player(self.player_b_name, fallback_b)
 
         pies_raw = state.get("pies", [])
         parsed_pies: dict[tuple[int, int], str] = {}
