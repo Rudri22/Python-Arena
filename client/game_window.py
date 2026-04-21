@@ -641,11 +641,13 @@ class PygameArenaWindow:
 
         OMEGA = math.tau / 1.75  # ~1.75s per sway cycle (within 1.5–2s range)
 
+        # Push snake slightly "back in space" so it sits behind the DJ deck.
+        depth_back_shift = -10.0
         # Anchor points derived from the DJ board bounding rect:
-        # - tail_anchor: top-center of the board (snake exits behind the equipment)
-        # - head_anchor: center of the board, slightly above (over the mixer/crossfader area)
-        tail_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top)
-        head_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.centery - dj_h * 0.08)
+        # - tail_anchor: top-center/back edge (snake exits behind the equipment)
+        # - head_anchor: mixer/crossfader zone, shifted slightly backward
+        tail_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top + 2.0 + depth_back_shift)
+        head_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.centery - dj_h * 0.08 + depth_back_shift)
 
         head_sway = math.sin(OMEGA * t)           # head leads
         tail_sway = math.sin(OMEGA * (t - 0.30))  # tail lags by 0.3s
@@ -667,17 +669,17 @@ class PygameArenaWindow:
 
         # Head pivots from the mixer base (transform-origin at base).
         head_tilt = math.radians(10.0) * head_sway
-        head_len = 28.0
+        head_len = 34.0
         head = pygame.Vector2(
             base.x + math.sin(head_tilt) * head_len + float(self._dj_head_variation) * 0.55,
-            base.y + math.cos(head_tilt) * head_len + math.cos(OMEGA * t + 0.25) * 2.8,
+            base.y - math.cos(head_tilt) * head_len + math.cos(OMEGA * t + 0.25) * 2.8,
         )
         if state == "wind_up":
             head.y -= 7.0 * throw_progress
         elif state == "throw":
             head.y += 3.0 * throw_progress
 
-        # LAYERING 1: Behind-board section (tail + back body) — below the DJ board surface.
+        # LAYERING 1: Behind-board section (tail + back body).
         back_curve = _bezier_points(
             tail_tip,
             pygame.Vector2(back.x + 7.0, back.y + 10.0),
@@ -688,19 +690,24 @@ class PygameArenaWindow:
         )
         _draw_serpent_points(back_curve, radius_scale=0.82)
 
-        # LAYERING 2: Board surface drawn on top of the tail section.
-        self.screen.blit(dj, dj_rect.topleft)
-
-        # LAYERING 3: Front section (base -> head) — above the DJ board surface.
+        # Build front section and keep it fully behind the board so only the
+        # head appears above the DJ set.
+        hidden_tip = pygame.Vector2(
+            base.x * 0.58 + head.x * 0.42,
+            dj_rect.y + dj_h * 0.30,
+        )
         front_curve = _bezier_points(
             base,
             pygame.Vector2(base.x + 6.0, base.y - 42.0),
-            pygame.Vector2(head.x - 8.0, head.y - 22.0),
-            head,
+            pygame.Vector2(hidden_tip.x - 8.0, hidden_tip.y - 14.0),
+            hidden_tip,
             count=20,
             amp=20.0,
         )
-        _draw_serpent_points(front_curve, radius_scale=0.96)
+        _draw_serpent_points(front_curve, radius_scale=0.86)
+
+        # LAYERING 2: Board stays clearly in front of the body.
+        self.screen.blit(dj, dj_rect.topleft)
 
         # Debug: red dots at tail_anchor, head_anchor, and every body segment point.
         if DEBUG_DJ:
@@ -712,9 +719,9 @@ class PygameArenaWindow:
                 pygame.draw.circle(self.screen, (255, 0, 0), (int(pt[0]), int(pt[1])), 3)
 
         # Direction at head tip for face and headphones alignment.
-        hx_f, hy_f = front_curve[-1]
-        dir_x = hx_f - front_curve[-2][0]
-        dir_y = hy_f - front_curve[-2][1]
+        hx_f, hy_f = float(head.x), float(head.y)
+        dir_x = hx_f - front_curve[-1][0]
+        dir_y = hy_f - front_curve[-1][1]
         norm = max(0.01, math.hypot(dir_x, dir_y))
         dir_x /= norm
         dir_y /= norm
