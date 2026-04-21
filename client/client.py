@@ -30,7 +30,6 @@ from client.ui import (
 )
 from shared.protocol import (
     MessageType,
-    make_chat_message,
     make_invitation_message,
     make_username_message,
 )
@@ -133,7 +132,13 @@ def run_client(server_ip: str, server_port: int, username: str) -> None:
         # If username is duplicate/taken, server returns error and we force
         # user to choose another name before entering lobby/chat.
         while True:
-            connection.send_message(make_username_message(username))
+            connection.send_message(
+                make_username_message(
+                    username,
+                    chat_host=connection.chat_host,
+                    chat_port=connection.chat_port,
+                )
+            )
             username_response = connection.receive_message()
 
             if username_response["type"] == MessageType.ERROR.value:
@@ -193,9 +198,15 @@ def run_client(server_ip: str, server_port: int, username: str) -> None:
                 )
                 response = connection.receive_message()
             else:
-                # Send user text as protocol chat message.
-                connection.send_message(make_chat_message(sender=username, message=text))
-                response = connection.receive_message()
+                # Direct peer chat: no server relay/ack expected for normal messages.
+                ok, error_text = connection.send_chat_message(
+                    sender=username,
+                    message=text,
+                    scope="lobby",
+                )
+                if not ok:
+                    show_system(error_text or "P2P chat send failed.")
+                continue
 
             # Wait for one server response and print it.
             if response["type"] == MessageType.ONLINE_USERS.value:
@@ -235,7 +246,13 @@ def check_username_available(server_ip: str, server_port: int, username: str) ->
     try:
         # consume connect ack
         connection.receive_message()
-        connection.send_message(make_username_message(username))
+        connection.send_message(
+            make_username_message(
+                username,
+                chat_host=connection.chat_host,
+                chat_port=connection.chat_port,
+            )
+        )
         response = connection.receive_message()
         if response.get("type") == MessageType.ERROR.value:
             message = str(response.get("payload", {}).get("message", "Username unavailable."))

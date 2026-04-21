@@ -29,7 +29,6 @@ from client.controls_config import DIRECTION_ACTIONS, load_direction_bindings
 from shared.protocol import (
     MessageType,
     SnakeSkin,
-    make_chat_message,
     make_invitation_message,
     make_movement_message,
     make_username_message,
@@ -1210,7 +1209,14 @@ class PygameArenaWindow:
         if not text or self.connection is None:
             return
         try:
-            self.connection.send_message(make_chat_message(sender=self.username, message=text))
+            ok, error_text = self.connection.send_chat_message(
+                sender=self.username,
+                message=text,
+                scope="match",
+                game_id=self.active_game_id,
+            )
+            if not ok and error_text:
+                self.chat_messages.append(f"[CHAT] {error_text}")
         except OSError:
             self.chat_messages.append("[CHAT] Send failed.")
 
@@ -2318,7 +2324,14 @@ class PygameArenaWindow:
         self.last_server_message = f"Connected to {self.server_ip}:{self.server_port}"
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
-        self.connection.send_message(make_username_message(self.username, skin_to_dict(self.local_skin)))
+        self.connection.send_message(
+            make_username_message(
+                self.username,
+                skin_to_dict(self.local_skin),
+                chat_host=self.connection.chat_host,
+                chat_port=self.connection.chat_port,
+            )
+        )
 
     def _disconnect_from_server(self) -> None:
         if self.connection is not None:

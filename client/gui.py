@@ -25,7 +25,6 @@ from client.network import ClientConnection
 from client.ui import validate_username
 from shared.protocol import (
     MessageType,
-    make_chat_message,
     make_invitation_message,
     make_username_message,
 )
@@ -1316,7 +1315,13 @@ class ArenaGuiApp:
             if event_type == "register_username":
                 # Send username once connection is up.
                 if self.connection is not None:
-                    self.connection.send_message(make_username_message(payload))
+                    self.connection.send_message(
+                        make_username_message(
+                            payload,
+                            chat_host=self.connection.chat_host,
+                            chat_port=self.connection.chat_port,
+                        )
+                    )
                     self._append_log(f"[SYSTEM] Username submitted: {payload}")
                 continue
 
@@ -1470,7 +1475,13 @@ class ArenaGuiApp:
                 self.username_var.set(candidate)
                 self._on_username_changed()
                 if self.connection is not None:
-                    self.connection.send_message(make_username_message(candidate))
+                    self.connection.send_message(
+                        make_username_message(
+                            candidate,
+                            chat_host=self.connection.chat_host,
+                            chat_port=self.connection.chat_port,
+                        )
+                    )
                     self._append_log(f"[SYSTEM] Retrying username: {candidate}")
             return
 
@@ -1611,7 +1622,15 @@ class ArenaGuiApp:
             self._ensure_chat_tab(target)
             self._select_chat_tab(target)
 
-        self.connection.send_message(make_chat_message(sender=self.username, message=text, recipient=recipient))
+        ok, error_text = self.connection.send_chat_message(
+            sender=self.username,
+            message=text,
+            recipient=recipient,
+            scope="lobby",
+        )
+        if not ok and error_text:
+            self._append_log(f"[ERROR] {error_text}")
+            return
         self.chat_var.set("")
 
     def _on_close(self) -> None:

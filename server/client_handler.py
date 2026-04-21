@@ -49,6 +49,7 @@ def broadcast_online_users(server_state: ServerState) -> None:
     message["payload"]["user_sessions"] = server_state.get_online_user_sessions()
     message["payload"]["wins"] = server_state.get_online_user_wins()
     message["payload"]["active_matches"] = server_state.get_active_matches_snapshot()
+    message["payload"]["chat_peers"] = server_state.get_chat_peers_snapshot()
 
     for sock in server_state.get_client_sockets():
         try:
@@ -583,48 +584,10 @@ def _handle_chat_message(
                 continue
         return
 
-    if recipient:
-        target_socket = server_state.get_socket_for_username(recipient)
-        if target_socket is None:
-            send_message(client_socket, make_error_message(f"User '{recipient}' is not online."))
-            return
-
-        chat_message = make_chat_message(sender=sender_username, message=text, recipient=recipient)
-        try:
-            send_message(target_socket, chat_message)
-        except OSError:
-            send_message(client_socket, make_error_message(f"Failed to deliver message to '{recipient}'."))
-            return
-
-        if recipient.casefold() != sender_username.casefold():
-            try:
-                send_message(client_socket, chat_message)
-            except OSError:
-                pass
-        return
-
-    # Keep lobby chat and in-game chat separated:
-    # - if sender is in/spectating a live match, route to that session only
-    # - otherwise route to lobby-wide public chat
-    match_ok, _reason, resolved_game_id, _players = server_state.resolve_live_match_for_interaction(sender_username)
-    if match_ok and resolved_game_id is not None:
-        chat_message = make_chat_message(sender=sender_username, message=text)
-        chat_message["payload"]["scope"] = "match"
-        chat_message["payload"]["game_id"] = resolved_game_id
-        for sock in server_state.get_match_session_sockets(resolved_game_id):
-            try:
-                send_message(sock, chat_message)
-            except OSError:
-                continue
-        return
-
-    chat_message = make_chat_message(sender=sender_username, message=text)
-    chat_message["payload"]["scope"] = "lobby"
-    for sock in server_state.get_client_sockets():
-        try:
-            send_message(sock, chat_message)
-        except OSError:
-            continue
+    send_message(
+        client_socket,
+        make_error_message("Server chat relay disabled. Use direct peer chat transport."),
+    )
 
 
 def handle_incoming_message(
@@ -665,6 +628,18 @@ def handle_incoming_message(
 
         # Cosmetic skin chosen in the lobby travels with the username payload.
         server_state.set_client_skin(client_id, payload.get("skin"))
+        chat_host = str(payload.get("chat_host", "")).strip()
+        try:
+            chat_port = int(payload.get("chat_port", 0))
+        except (TypeError, ValueError):
+            chat_port = 0
+        if not chat_host:
+            try:
+                chat_host = str(client_socket.getpeername()[0]).strip()
+            except OSError:
+                chat_host = ""
+        if chat_host and 1 <= chat_port <= 65535:
+            server_state.set_client_chat_endpoint(client_id, chat_host, chat_port)
 
         # If the player is reconnecting into an active match (game window), mark
         # them as ready so the pre-match countdown can begin once both arrive.

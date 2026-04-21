@@ -63,6 +63,8 @@ class ServerState:
     _client_sockets: dict[str, socket.socket | None] = field(default_factory=dict)
     _client_skins: dict[str, SnakeSkin] = field(default_factory=dict)
     _skins_by_username: dict[str, SnakeSkin] = field(default_factory=dict)
+    _client_chat_endpoints: dict[str, tuple[str, int]] = field(default_factory=dict)
+    _chat_endpoint_by_username: dict[str, tuple[str, int]] = field(default_factory=dict)
     # Keyed by normalized username for case-insensitive stability.
     _wins_by_user: dict[str, int] = field(default_factory=dict)
     # Per-online-username reconnect/session version to detect leave+rejoin.
@@ -104,6 +106,7 @@ class ServerState:
             previous_username = self._client_usernames.pop(client_id, None)
             self._client_sockets.pop(client_id, None)
             self._client_skins.pop(client_id, None)
+            self._client_chat_endpoints.pop(client_id, None)
 
             if previous_username is not None:
                 owner_id = self._username_to_client.get(_normalize_username(previous_username))
@@ -137,6 +140,7 @@ class ServerState:
             previous_username = self._client_usernames.pop(client_id, None)
             self._client_sockets.pop(client_id, None)
             self._client_skins.pop(client_id, None)
+            self._client_chat_endpoints.pop(client_id, None)
 
             if previous_username is None:
                 return events
@@ -205,6 +209,7 @@ class ServerState:
             if previous_username is not None and previous_username != username:
                 self._username_to_client.pop(_normalize_username(previous_username), None)
                 self._user_session_versions.pop(previous_username, None)
+                self._chat_endpoint_by_username.pop(_normalize_username(previous_username), None)
                 self._cleanup_user_lobby_state(previous_username)
 
             self._client_usernames[client_id] = username
@@ -212,6 +217,11 @@ class ServerState:
             remembered_skin = self._skins_by_username.get(normalized_username)
             if remembered_skin is not None:
                 self._client_skins[client_id] = remembered_skin
+            remembered_endpoint = self._chat_endpoint_by_username.get(normalized_username)
+            if remembered_endpoint is not None:
+                self._client_chat_endpoints[client_id] = remembered_endpoint
+            elif client_id in self._client_chat_endpoints:
+                self._chat_endpoint_by_username[normalized_username] = self._client_chat_endpoints[client_id]
             self._user_session_versions[username] = self._next_user_session_version
             self._wins_by_user[normalized_username] = self._wins_by_user.get(normalized_username, 0)
             self._next_user_session_version += 1
@@ -233,6 +243,28 @@ class ServerState:
                 username = self._client_usernames.get(client_id)
                 if username is not None:
                     self._skins_by_username[_normalize_username(username)] = skin
+
+    def set_client_chat_endpoint(self, client_id: str, host: str | None, port: int | None) -> None:
+        """Store a peer-chat endpoint advertised by one connected client."""
+
+        if host is None or port is None:
+            return
+        host_text = str(host).strip()
+        try:
+            port_num = int(port)
+        except (TypeError, ValueError):
+            return
+        if not host_text or not (1 <= port_num <= 65535):
+            return
+
+        endpoint = (host_text, port_num)
+        with self._lock:
+            if client_id not in self._client_usernames:
+                return
+            self._client_chat_endpoints[client_id] = endpoint
+            username = self._client_usernames.get(client_id)
+            if username is not None:
+                self._chat_endpoint_by_username[_normalize_username(username)] = endpoint
 
     def get_skin_dict_for_username(self, username: str) -> dict[str, str]:
         """Return the skin dict for a username, or a default skin if unset."""
@@ -315,6 +347,23 @@ class ServerState:
             for username in self._online_usernames_locked():
                 result[username] = int(self._wins_by_user.get(_normalize_username(username), 0))
             return result
+
+    def get_chat_peers_snapshot(self) -> dict[str, dict[str, str | int]]:
+        """Return P2P chat listener endpoints for currently online usernames."""
+
+        with self._lock:
+            peers: dict[str, dict[str, str | int]] = {}
+            for username in self._online_usernames_locked():
+                normalized = _normalize_username(username)
+                client_id = self._username_to_client.get(normalized)
+                endpoint = self._client_chat_endpoints.get(client_id) if client_id is not None else None
+                if endpoint is None:
+                    endpoint = self._chat_endpoint_by_username.get(normalized)
+                if endpoint is None:
+                    continue
+                host, port = endpoint
+                peers[username] = {"host": host, "port": int(port)}
+            return peers
 
     def get_active_matches_snapshot(self) -> list[dict[str, Any]]:
         """Return active match ids with current player pairs for lobby routing."""

@@ -415,12 +415,18 @@ def make_connect_message(
 def make_username_message(
     username: str,
     skin: dict[str, str] | SnakeSkin | None = None,
+    chat_host: str | None = None,
+    chat_port: int | None = None,
 ) -> dict[str, Any]:
     """Sent by the client after connection so the server can register a name."""
 
     payload: dict[str, Any] = {"username": username}
     if skin is not None:
         payload["skin"] = skin_to_dict(skin) if isinstance(skin, SnakeSkin) else dict(skin)
+    if chat_host is not None:
+        payload["chat_host"] = str(chat_host)
+    if chat_port is not None:
+        payload["chat_port"] = int(chat_port)
     return build_message(MessageType.USERNAME, **payload)
 
 

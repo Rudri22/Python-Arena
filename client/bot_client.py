@@ -142,7 +142,13 @@ def run_bot(server_ip: str, server_port: int, username: str, move_interval_ms: i
     try:
         # Consume connect ACK then register username
         _ = connection.receive_message()
-        connection.send_message(make_username_message(username))
+        connection.send_message(
+            make_username_message(
+                username,
+                chat_host=connection.chat_host,
+                chat_port=connection.chat_port,
+            )
+        )
         print(f"[BOT] Connected as '{username}' → {server_ip}:{server_port}")
 
         # Join quick-match queue immediately (same flow as the Pygame lobby)

@@ -29,7 +29,6 @@ from shared.protocol import (
     SKIN_COLORS,
     SnakeSkin,
     TAILS,
-    make_chat_message,
     make_invitation_message,
     make_username_message,
     sanitize_skin,
@@ -1733,7 +1732,14 @@ class PygameLobbyScene:
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
         try:
-            self.connection.send_message(make_username_message(self.username, skin_to_dict(self.current_skin)))
+            self.connection.send_message(
+                make_username_message(
+                    self.username,
+                    skin_to_dict(self.current_skin),
+                    chat_host=self.connection.chat_host,
+                    chat_port=self.connection.chat_port,
+                )
+            )
             self._append_log(f"[SYSTEM] Username submitted: {self.username}")
         except OSError as error:
             self._append_log(f"[ERROR] Username submit failed: {error}")
@@ -1748,7 +1754,14 @@ class PygameLobbyScene:
             return
         self._next_username_retry_ms = 0
         try:
-            self.connection.send_message(make_username_message(self.username, skin_to_dict(self.current_skin)))
+            self.connection.send_message(
+                make_username_message(
+                    self.username,
+                    skin_to_dict(self.current_skin),
+                    chat_host=self.connection.chat_host,
+                    chat_port=self.connection.chat_port,
+                )
+            )
             self._append_log(f"[SYSTEM] Retrying username: {self.username}")
         except OSError as error:
             self._append_log(f"[ERROR] Username retry failed: {error}")
@@ -2196,16 +2209,26 @@ class PygameLobbyScene:
             return
         try:
             if self.chat_mode == "private" and self.active_private_target is not None:
-                self.connection.send_message(
-                    make_chat_message(
-                        sender=self.username,
-                        message=text,
-                        recipient=self.active_private_target,
-                    )
+                ok, error_text = self.connection.send_chat_message(
+                    sender=self.username,
+                    message=text,
+                    recipient=self.active_private_target,
+                    scope="lobby",
                 )
-                self._append_private_chat_bubble(self.active_private_target, self.username, text)
+                if ok:
+                    self._append_private_chat_bubble(self.active_private_target, self.username, text)
+                elif error_text:
+                    self._append_log(f"[ERROR] {error_text}")
             else:
-                self.connection.send_message(make_chat_message(sender=self.username, message=text))
+                ok, error_text = self.connection.send_chat_message(
+                    sender=self.username,
+                    message=text,
+                    scope="lobby",
+                )
+                if ok:
+                    self._append_chat_bubble(self.username, text)
+                elif error_text:
+                    self._append_log(f"[ERROR] {error_text}")
             self.chat_text = ""
             self.chat_cursor = 0
         except OSError as error:
@@ -2869,7 +2892,12 @@ class PygameLobbyScene:
             return
         try:
             self.connection.send_message(
-                make_username_message(self.username, skin_to_dict(self.current_skin))
+                make_username_message(
+                    self.username,
+                    skin_to_dict(self.current_skin),
+                    chat_host=self.connection.chat_host,
+                    chat_port=self.connection.chat_port,
+                )
             )
         except OSError as error:
             self._append_log(f"[ERROR] Skin update failed: {error}")
@@ -3272,13 +3300,7 @@ class PygameLobbyScene:
             visible_idx = (pos[1] - (right.y + 44)) // row_h
             idx = self.players_scroll + visible_idx
             if 0 <= idx < len(lobby_users) and 0 <= visible_idx < self._players_visible_count():
-                row = self._player_row_rect(int(visible_idx))
                 selected = lobby_users[int(idx)]
-                if selected.casefold() != self.username.casefold():
-                    eye_rect = self._player_eye_rect(row)
-                    if selected not in self.idle_users and eye_rect.collidepoint(pos):
-                        self._start_spectate(selected, game_id=self._active_match_id_for_user(selected))
-                        return
                 self.selected_index = int(idx)
                 if selected.casefold() != self.username.casefold():
                     self.invite_name_text = selected
@@ -4061,15 +4083,6 @@ class PygameLobbyScene:
                 else:
                     name_color = (232, 242, 252)
                 frame.blit(self.font_small.render(short_label, True, name_color), (row.x + 10, row.y + 6))
-                if user.casefold() != self.username.casefold():
-                    eye_rect = self._player_eye_rect(row)
-                    if user not in self.idle_users and self.eye_icon is not None:
-                        eye = self._prepare_icon_transparent_bg(self.eye_icon, (18, 18))
-                        frame.blit(eye, eye_rect.topleft)
-                    elif user not in self.idle_users:
-                        pygame.draw.ellipse(frame, (132, 232, 174), eye_rect, 2)
-                        pupil = pygame.Rect(eye_rect.x + 7, eye_rect.y + 5, 4, 8)
-                        pygame.draw.ellipse(frame, (132, 232, 174), pupil)
             if len(lobby_users) > visible_players:
                 up, down, track = self._players_scrollbar_parts()
                 pygame.draw.rect(frame, (22, 44, 70), up, border_radius=4)
