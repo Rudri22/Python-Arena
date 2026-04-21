@@ -661,6 +661,10 @@ def handle_incoming_message(
         # Cosmetic skin chosen in the lobby travels with the username payload.
         server_state.set_client_skin(client_id, payload.get("skin"))
 
+        # If the player is reconnecting into an active match (game window), mark
+        # them as ready so the pre-match countdown can begin once both arrive.
+        server_state.mark_player_in_game_window(username)
+
         # PBI 2.4 + 2.5: push lobby state updates after successful username set.
         broadcast_online_users(server_state)
         _send_waiting_status_if_needed(client_socket, server_state)

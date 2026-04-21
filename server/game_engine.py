@@ -119,6 +119,8 @@ class MatchRuntime:
     pie_counter: int = 1
     lockstep_moves: dict[str, bool] = field(default_factory=dict)
     countdown_ticks: int = 25  # ~3 s at 0.12 s/tick; frozen until this reaches 0
+    # Countdown only ticks once both players have connected via game window.
+    players_in_window: set[str] = field(default_factory=set)
     # Authoritative wall-clock start (set when countdown completes).
     started_at_monotonic: float | None = None
     # Tick at which to announce the next throw target.
@@ -201,10 +203,11 @@ def _target_length_for_health(health: int) -> int:
     - above baseline health grows length
     """
 
+    MIN_SNAKE_LENGTH = 3
     if health <= 0:
-        return 1
+        return MIN_SNAKE_LENGTH
     scaled_length = (INITIAL_SNAKE_LENGTH * float(health)) / float(INITIAL_HEALTH)
-    return max(1, int(round(scaled_length)))
+    return max(MIN_SNAKE_LENGTH, int(round(scaled_length)))
 
 
 def _sync_snake_length_to_health(snake: SnakeRuntime) -> None:

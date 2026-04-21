@@ -1570,6 +1570,8 @@ class PygameLobbyScene:
         self.controls_feedback_until_ms = 0
         self.controls_key_tile = self._load_input_prompt_asset("Tiles (White)/tile_0051.png")
         self.controls_listen_tile = self._load_input_prompt_asset("Tiles (White)/tile_0066.png")
+        self._bg_cache: pygame.Surface | None = None
+        self._bg_cache_size: tuple[int, int] = (0, 0)
 
         self._connect()
 
@@ -2430,8 +2432,7 @@ class PygameLobbyScene:
         return pygame.Rect(players.x + 10, players.y + 44, players.width - 20, max(0, players.height - 52))
 
     def _lobby_online_users(self) -> list[str]:
-        idle_casefold = {u.casefold() for u in self.idle_users}
-        return [u for u in self.online_users if u.casefold() in idle_casefold]
+        return list(self.online_users)
 
     def _players_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
         area = self._players_list_area_rect()
@@ -3405,9 +3406,14 @@ class PygameLobbyScene:
     ) -> None:
         mouse = pygame.mouse.get_pos()
         hover = enabled and rect.collidepoint(mouse)
+        pressed = hover and pygame.mouse.get_pressed()[0]
         if enabled:
-            fill = (24, 46, 72) if not hover else (34, 66, 98)
-            edge = accent
+            if pressed:
+                fill = (14, 34, 56)
+                edge = tuple(max(0, c - 40) for c in accent)  # type: ignore[assignment]
+            else:
+                fill = (24, 46, 72) if not hover else (34, 66, 98)
+                edge = accent
             text_color = (230, 238, 248)
         else:
             fill = (38, 52, 68)
@@ -3432,16 +3438,12 @@ class PygameLobbyScene:
         ranked = [(user, wins) for user, wins, _order in ranked]
         return ranked
 
-    def _draw(self) -> None:
-        self.frame += 1
-        frame = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
-        # Global lobby background now matches leaderboard style:
-        # near-black navy + subtle circuit-board traces.
+    def _build_bg_cache(self) -> pygame.Surface:
+        bg = pygame.Surface((self.w, self.h))
         for y in range(self.h):
             t = y / max(1, self.h - 1)
             c = lerp_color((5, 16, 28), (4, 12, 22), t)
-            pygame.draw.line(frame, c, (0, y), (self.w, y))
-
+            pygame.draw.line(bg, c, (0, y), (self.w, y))
         circuit = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
         for y in range(20, self.h, 38):
             pygame.draw.line(circuit, (42, 112, 110, 20), (14, y), (self.w - 16, y), 1)
@@ -3449,13 +3451,22 @@ class PygameLobbyScene:
             pygame.draw.circle(circuit, (66, 154, 146, 26), (self.w - 16, y), 1)
         for x in range(24, self.w, 52):
             pygame.draw.line(circuit, (34, 94, 98, 18), (x, 10), (x, self.h - 10), 1)
-        # subtle branch traces
         for x in range(44, self.w, 120):
             for y in range(52, self.h, 120):
                 pygame.draw.line(circuit, (44, 126, 122, 22), (x, y), (x + 18, y), 1)
                 pygame.draw.line(circuit, (44, 126, 122, 22), (x + 18, y), (x + 18, y + 14), 1)
                 pygame.draw.circle(circuit, (76, 178, 166, 30), (x + 18, y + 14), 1)
-        frame.blit(circuit, (0, 0))
+        bg.blit(circuit, (0, 0))
+        return bg
+
+    def _draw(self) -> None:
+        self.frame += 1
+        size = (self.w, self.h)
+        if self._bg_cache is None or self._bg_cache_size != size:
+            self._bg_cache = self._build_bg_cache()
+            self._bg_cache_size = size
+        frame = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
+        frame.blit(self._bg_cache, (0, 0))
 
         panel = pygame.Rect(24, 24, self.w - 48, self.h - 48)
         pygame.draw.rect(frame, (8, 20, 34, 238), panel, border_radius=22)
@@ -4038,9 +4049,15 @@ class PygameLobbyScene:
                 selected = idx == self.selected_index
                 pygame.draw.rect(frame, (20, 52, 78), row, border_radius=8)
                 pygame.draw.rect(frame, (84, 220, 176) if selected else (78, 128, 170), row, 1, border_radius=8)
-                label = f"{user} (You)" if user.casefold() == self.username.casefold() else user
+                is_self = user.casefold() == self.username.casefold()
+                in_match = user.casefold() not in {u.casefold() for u in self.idle_users}
+                label = f"{user} (You)" if is_self else user
                 short_label = (label[:16] + "...") if len(label) > 16 else label
-                frame.blit(self.font_small.render(short_label, True, (232, 242, 252)), (row.x + 10, row.y + 6))
+                if in_match:
+                    name_color = (255, 200, 80)
+                else:
+                    name_color = (232, 242, 252)
+                frame.blit(self.font_small.render(short_label, True, name_color), (row.x + 10, row.y + 6))
                 if user.casefold() != self.username.casefold():
                     eye_rect = self._player_eye_rect(row)
                     if user not in self.idle_users and self.eye_icon is not None:

@@ -408,6 +408,29 @@ class ServerState:
             self._remove_from_quick_queue_locked(player)
             return True, "cancelled"
 
+    def mark_player_in_game_window(self, username: str) -> None:
+        """Record that a player has connected via the game window socket.
+
+        Once both players have checked in, the pre-match countdown begins.
+        If this completes the pair, the countdown is reset to its initial
+        value so both players always get the full grace period.
+        """
+        with self._lock:
+            canonical = self._resolve_username(username)
+            if canonical is None:
+                return
+            game_id = self._user_to_match.get(canonical)
+            if game_id is None:
+                return
+            runtime = self._match_runtimes.get(game_id)
+            if runtime is None:
+                return
+            runtime.players_in_window.add(canonical)
+            if len(runtime.players_in_window) >= 2:
+                # Both players arrived — reset to full countdown so they both
+                # see the complete 3-2-1 sequence from the same starting point.
+                runtime.countdown_ticks = 25
+
     def mark_match_handoff(self, username: str, ttl_seconds: float = 8.0) -> tuple[bool, str]:
         """Mark an active match for short reconnect handoff (GUI -> Pygame)."""
 
@@ -663,7 +686,8 @@ class ServerState:
                 # even when no fresh movement command arrived this frame.
                 if runtime.status == "running":
                     if runtime.countdown_ticks > 0:
-                        runtime.countdown_ticks -= 1
+                        if len(runtime.players_in_window) >= 2:
+                            runtime.countdown_ticks -= 1
                     else:
                         # Timer must be real-time authoritative and independent
                         # from movement/input cadence.
