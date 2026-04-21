@@ -271,6 +271,27 @@ class ServerState:
             p2: self._skin_dict_for_username_locked(p2),
         }
 
+    def _attach_skins_to_state_locked(
+        self,
+        state_payload: dict[str, Any],
+        players: tuple[str, str],
+    ) -> dict[str, Any]:
+        """Attach authoritative skins as both top-level map and per-snake field."""
+
+        skins = self._match_skins_locked(players)
+        state_payload["skins"] = skins
+        snakes_payload = state_payload.get("snakes")
+        if isinstance(snakes_payload, list):
+            for snake in snakes_payload:
+                if not isinstance(snake, dict):
+                    continue
+                player = str(snake.get("player", "")).strip()
+                if player:
+                    skin = skins.get(player)
+                    if skin is not None:
+                        snake["skin"] = dict(skin)
+        return state_payload
+
     def get_online_users(self) -> list[str]:
         """Return all online usernames sorted for deterministic payloads."""
 
@@ -655,7 +676,7 @@ class ServerState:
             state = to_protocol_state(runtime)
             players = self._active_matches.get(game_id)
             if players is not None:
-                state["skins"] = self._match_skins_locked(players)
+                state = self._attach_skins_to_state_locked(state, players)
             return state
 
     def process_player_movement(
@@ -758,7 +779,7 @@ class ServerState:
                     games_to_cleanup.append(game_id)
 
                 state_payload = to_protocol_state(runtime)
-                state_payload["skins"] = self._match_skins_locked(players)
+                state_payload = self._attach_skins_to_state_locked(state_payload, players)
 
                 updates.append(
                     {
