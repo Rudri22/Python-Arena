@@ -232,14 +232,13 @@ class MusicController:
         self.init()
         if not self.ready:
             return False
-        if self.playing:
+        if pygame.mixer.music.get_busy():
             pygame.mixer.music.pause()
             self.playing = False
         else:
-            if pygame.mixer.music.get_pos() < 0:
+            pygame.mixer.music.unpause()
+            if not pygame.mixer.music.get_busy():
                 pygame.mixer.music.play(-1)
-            else:
-                pygame.mixer.music.unpause()
             self.playing = True
         return self.playing
 

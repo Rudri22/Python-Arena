@@ -29,6 +29,7 @@ from client.controls_config import DIRECTION_ACTIONS, load_direction_bindings
 from shared.protocol import (
     MessageType,
     SnakeSkin,
+    make_emote_message,
     make_invitation_message,
     make_movement_message,
     make_username_message,
@@ -56,6 +57,7 @@ ARENA_TOP = 255
 ARENA_DIR = Path(__file__).resolve().parents[1] / "assets" / "arena"
 TERRAIN_DIR = Path(__file__).resolve().parents[1] / "assets" / "terrain"
 SOUNDS_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
+EMOTES_DIR = Path(__file__).resolve().parents[1] / "assets" / "cr emotes"
 
 # ── Gameplay grid (mirrors server/game_engine.py) ──────────────────────────
 GAME_BOARD_COLS = 20
@@ -90,6 +92,12 @@ HUD_ACCENT   = (80, 200, 255)
 HUD_HEALTH_A = (50, 215, 90)
 HUD_HEALTH_B = (255, 175, 35)
 HUD_DANGER   = (220, 60, 60)
+
+EMOTE_DISPLAY_MS = 3000
+EMOTE_ICON_SIZE = 70
+EMOTE_NAMES = ("heheheha", "grrr", "cry")
+EMOTE_KEYS = {pygame.K_1: "heheheha", pygame.K_2: "grrr", pygame.K_3: "cry"}
+EMOTE_COOLDOWN_MS = 2000
 
 _DIRECTIONS: dict[str, tuple[int, int]] = {
     "up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0),
@@ -350,6 +358,14 @@ class PygameArenaWindow:
         self.chat_cursor = 0
         self.chat_typing = False
         self.cheer_pulse_until_ms = 0
+
+        # ── Emotes ────────────────────────────────────────────────────
+        self._emote_images: dict[str, pygame.Surface] = {}
+        self._emote_sounds: dict[str, pygame.mixer.Sound] = {}
+        self._load_emote_assets()
+        self._left_emote: dict | None = None   # {image, expires_ms}
+        self._right_emote: dict | None = None
+        self._last_emote_ms = 0
 
         # ── Fonts ──────────────────────────────────────────────────────
         self.font_hud       = pygame.font.SysFont("consolas", 22, bold=True)
@@ -1152,6 +1168,8 @@ class PygameArenaWindow:
                 elif event.key == pygame.K_t:
                     self.chat_typing = True
                     self.chat_cursor = len(self.chat_input)
+                elif event.key in EMOTE_KEYS:
+                    self._send_emote(EMOTE_KEYS[event.key])
                 self._handle_direction_input(event.key)
 
     def _handle_chat_key(self, event: pygame.event.Event) -> bool:
@@ -2480,6 +2498,24 @@ class PygameArenaWindow:
             self.chat_messages.append(f"{sender}: {text}")
             return
 
+        if msg_type == MessageType.EMOTE.value:
+            sender = str(payload.get("sender", ""))
+            emote  = str(payload.get("emote", ""))
+            if emote in self._emote_images:
+                expires = pygame.time.get_ticks() + EMOTE_DISPLAY_MS
+                entry = {"image": self._emote_images[emote], "expires_ms": expires}
+                if sender.casefold() == self.player_a_name.casefold():
+                    self._left_emote = entry
+                else:
+                    self._right_emote = entry
+                sound = self._emote_sounds.get(emote)
+                if sound is not None:
+                    try:
+                        sound.play()
+                    except Exception:
+                        pass
+            return
+
         if msg_type == MessageType.GAME_OVER.value:
             self.show_result_screen = True
             self.result_winner = str(payload.get("winner", "-"))
@@ -2504,6 +2540,39 @@ class PygameArenaWindow:
 
         if msg_type == "socket_error":
             self._mark_connection_issue(str(payload.get("message", "Lost connection.")))
+
+    def _load_emote_assets(self) -> None:
+        for name in EMOTE_NAMES:
+            img_path = EMOTES_DIR / f"{name}.jpeg"
+            if img_path.exists():
+                try:
+                    raw = pygame.image.load(str(img_path)).convert_alpha()
+                    self._emote_images[name] = pygame.transform.smoothscale(raw, (EMOTE_ICON_SIZE, EMOTE_ICON_SIZE))
+                except pygame.error:
+                    pass
+            snd_path = EMOTES_DIR / f"{name}.mp3"
+            if snd_path.exists():
+                try:
+                    if not pygame.mixer.get_init():
+                        pygame.mixer.init()
+                    self._emote_sounds[name] = pygame.mixer.Sound(str(snd_path))
+                    self._emote_sounds[name].set_volume(0.7)
+                except pygame.error:
+                    pass
+
+    def _send_emote(self, emote_name: str) -> None:
+        if self.connection is None or self.active_game_id is None or self.show_result_screen:
+            return
+        now = pygame.time.get_ticks()
+        if now - self._last_emote_ms < EMOTE_COOLDOWN_MS:
+            return
+        self._last_emote_ms = now
+        try:
+            self.connection.send_message(
+                make_emote_message(sender=self.username, emote=emote_name, game_id=self.active_game_id)
+            )
+        except OSError:
+            pass
 
     def _play_game_sound(self) -> None:
         if self._game_sound_started:
@@ -3151,6 +3220,29 @@ class PygameArenaWindow:
                 ls  = self.font_hud_sm.render(line[:90], True, clr)
                 self.screen.blit(ls, (self.arena_x + 14, cy_chat + 4 + i * 18))
 
+    def _draw_emotes(self) -> None:
+        now = pygame.time.get_ticks()
+        pad = 8
+        for emote_data, x in (
+            (self._left_emote,  pad),
+            (self._right_emote, WINDOW_WIDTH - EMOTE_ICON_SIZE - pad),
+        ):
+            if emote_data is None:
+                continue
+            remaining_ms = emote_data["expires_ms"] - now
+            if remaining_ms <= 0:
+                continue
+            fade = min(1.0, remaining_ms / 500.0)
+            alpha = int(255 * fade)
+            # Dark background pill
+            bg = pygame.Surface((EMOTE_ICON_SIZE + 4, EMOTE_ICON_SIZE + 4), pygame.SRCALPHA)
+            bg.fill((0, 0, 0, int(170 * fade)))
+            self.screen.blit(bg, (x - 2, 38))
+            # Emote icon
+            icon = emote_data["image"].copy()
+            icon.set_alpha(alpha)
+            self.screen.blit(icon, (x, 40))
+
     def _draw_result_screen(self) -> None:
         ticks = pygame.time.get_ticks()
 
@@ -3292,6 +3384,7 @@ class PygameArenaWindow:
 
         # ── HUD + overlays ─────────────────────────────────────────────
         self._draw_hud()
+        self._draw_emotes()
         self._draw_countdown_overlay()
         if self.show_result_screen:
             self._draw_result_screen()

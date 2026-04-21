@@ -25,6 +25,7 @@ class MessageType(str, Enum):
     GAME_STATE = "game_state"
     GAME_OVER = "game_over"
     CHAT = "chat"
+    EMOTE = "emote"
     ERROR = "error"
 
 
@@ -207,6 +208,7 @@ REQUIRED_FIELDS: dict[MessageType, set[str]] = {
     MessageType.GAME_STATE: {"game_id", "state"},
     MessageType.GAME_OVER: {"game_id", "winner"},
     MessageType.CHAT: {"sender", "message"},
+    MessageType.EMOTE: {"sender", "emote"},
     MessageType.ERROR: {"message"},
 }
 
@@ -626,4 +628,18 @@ def make_error_message(message: str, details: str | None = None) -> dict[str, An
         payload["details"] = details
 
     return build_message(MessageType.ERROR, **payload)
+
+
+def make_emote_message(
+    sender: str,
+    emote: str,
+    game_id: str | None = None,
+) -> dict[str, Any]:
+    """Sent by a player to broadcast an in-game emote to both players and spectators."""
+
+    payload: dict[str, Any] = {"sender": sender, "emote": emote}
+    if game_id is not None:
+        payload["game_id"] = game_id
+
+    return build_message(MessageType.EMOTE, **payload)
 

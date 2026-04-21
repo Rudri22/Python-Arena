@@ -190,6 +190,15 @@ def run_bot(server_ip: str, server_port: int, username: str, move_interval_ms: i
                     active_game_id = str(payload.get("game_id", "")) or active_game_id
                     last_state     = None
                     print(f"[BOT] Match started: {active_game_id}")
+                    # Re-send USERNAME so the server registers the bot as being
+                    # in the game window, allowing the pre-match countdown to start.
+                    connection.send_message(
+                        make_username_message(
+                            username,
+                            chat_host=connection.chat_host,
+                            chat_port=connection.chat_port,
+                        )
+                    )
                     continue
 
                 continue  # ignore declined/cancelled/spectate notices

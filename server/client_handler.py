@@ -17,6 +17,7 @@ from shared.protocol import (
     build_message,
     make_chat_message,
     make_connect_message,
+    make_emote_message,
     make_error_message,
     make_game_over_message,
     make_game_state_message,
@@ -590,6 +591,43 @@ def _handle_chat_message(
     )
 
 
+_VALID_EMOTES: frozenset[str] = frozenset({"heheheha", "grrr", "cry"})
+
+
+def _handle_emote_message(
+    client_socket: socket.socket,
+    payload: dict,
+    server_state: ServerState,
+    sender_client_id: str,
+) -> None:
+    sender_username = server_state.get_client_username(sender_client_id)
+    if sender_username is None:
+        return
+
+    claimed_sender = str(payload.get("sender", "")).strip()
+    if claimed_sender and claimed_sender.casefold() != sender_username.casefold():
+        return
+
+    emote = str(payload.get("emote", "")).strip()
+    if emote not in _VALID_EMOTES:
+        return
+
+    game_id = str(payload.get("game_id", "")).strip() or None
+    success, _reason, resolved_game_id, _players = server_state.resolve_live_match_for_interaction(
+        sender_username,
+        game_id=game_id,
+    )
+    if not success or resolved_game_id is None:
+        return
+
+    msg = make_emote_message(sender=sender_username, emote=emote, game_id=resolved_game_id)
+    for sock in server_state.get_match_session_sockets(resolved_game_id):
+        try:
+            send_message(sock, msg)
+        except OSError:
+            continue
+
+
 def handle_incoming_message(
     client_socket: socket.socket,
     message: dict,
@@ -670,6 +708,15 @@ def handle_incoming_message(
 
     if message_type == MessageType.CHAT.value:
         _handle_chat_message(
+            client_socket=client_socket,
+            payload=payload,
+            server_state=server_state,
+            sender_client_id=client_id,
+        )
+        return
+
+    if message_type == MessageType.EMOTE.value:
+        _handle_emote_message(
             client_socket=client_socket,
             payload=payload,
             server_state=server_state,
