@@ -641,36 +641,35 @@ class PygameArenaWindow:
 
         OMEGA = math.tau / 1.75  # ~1.75s per sway cycle (within 1.5–2s range)
 
-        # Anchor points derived from the DJ board bounding rect:
-        # - tail_anchor: top-center of the board (snake exits behind the equipment)
-        # - head_anchor: center of the board, slightly above (over the mixer/crossfader area)
-        tail_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top)
-        head_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.centery - dj_h * 0.08)
+        # Anchor points shifted backward so the snake stays behind the DJ set.
+        depth_back_shift = -26.0
+        tail_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top + depth_back_shift)
+        head_anchor = pygame.Vector2(dj_rect.centerx, dj_rect.top + dj_h * 0.12 + depth_back_shift)
 
         head_sway = math.sin(OMEGA * t)           # head leads
         tail_sway = math.sin(OMEGA * (t - 0.30))  # tail lags by 0.3s
 
-        # Head base position: sways ~20px laterally from head_anchor
-        base_x = head_anchor.x + head_sway * 20.0 + float(self._dj_head_variation) * 0.35
-        base_y = head_anchor.y + math.sin(OMEGA * (t - 0.10)) * 1.4
+        # Head base position: reduced sway while staying behind board.
+        base_x = head_anchor.x + head_sway * 14.0 + float(self._dj_head_variation) * 0.35
+        base_y = head_anchor.y + math.sin(OMEGA * (t - 0.10)) * 1.1
         base = pygame.Vector2(base_x, base_y)
 
-        # Tail position: sways ~20px laterally from tail_anchor, with 0.3s phase lag
+        # Tail position behind top edge with same phase lag.
         back = pygame.Vector2(
-            tail_anchor.x + tail_sway * 20.0 + float(self._dj_tail_variation.x) * 0.35,
-            tail_anchor.y + math.cos(OMEGA * (t - 0.30)) * 2.0 + float(self._dj_tail_variation.y) * 0.25,
+            tail_anchor.x + tail_sway * 16.0 + float(self._dj_tail_variation.x) * 0.35,
+            tail_anchor.y + math.cos(OMEGA * (t - 0.30)) * 1.6 + float(self._dj_tail_variation.y) * 0.25,
         )
         tail_tip = pygame.Vector2(
             back.x + tail_sway * 10.0,
             back.y - 24.0 + math.cos(OMEGA * (t - 0.25)) * 1.4,
         )
 
-        # Head pivots from the mixer base (transform-origin at base).
+        # Head pivots from hidden base, but remains above deck top.
         head_tilt = math.radians(10.0) * head_sway
-        head_len = 28.0
+        head_len = 20.0
         head = pygame.Vector2(
             base.x + math.sin(head_tilt) * head_len + float(self._dj_head_variation) * 0.55,
-            base.y + math.cos(head_tilt) * head_len + math.cos(OMEGA * t + 0.25) * 2.8,
+            dj_rect.y + 4.0 + math.cos(OMEGA * t + 0.25) * 2.0,
         )
         if state == "wind_up":
             head.y -= 7.0 * throw_progress
@@ -684,23 +683,23 @@ class PygameArenaWindow:
             pygame.Vector2(base.x - 12.0, base.y + 14.0),
             base,
             count=18,
-            amp=18.0,
+            amp=12.0,
         )
         _draw_serpent_points(back_curve, radius_scale=0.82)
 
-        # LAYERING 2: Board surface drawn on top of the tail section.
-        self.screen.blit(dj, dj_rect.topleft)
-
-        # LAYERING 3: Front section (base -> head) — above the DJ board surface.
+        # Keep the entire front body behind board; only the head should show above.
         front_curve = _bezier_points(
             base,
-            pygame.Vector2(base.x + 6.0, base.y - 42.0),
-            pygame.Vector2(head.x - 8.0, head.y - 22.0),
-            head,
+            pygame.Vector2(base.x + 5.0, base.y - 22.0),
+            pygame.Vector2(base.x + 2.0, dj_rect.y + dj_h * 0.24),
+            pygame.Vector2(base.x, dj_rect.y + dj_h * 0.26),
             count=20,
-            amp=20.0,
+            amp=10.0,
         )
-        _draw_serpent_points(front_curve, radius_scale=0.96)
+        _draw_serpent_points(front_curve, radius_scale=0.82)
+
+        # LAYERING 2: Board surface drawn in front of body.
+        self.screen.blit(dj, dj_rect.topleft)
 
         # Debug: red dots at tail_anchor, head_anchor, and every body segment point.
         if DEBUG_DJ:
@@ -712,9 +711,12 @@ class PygameArenaWindow:
                 pygame.draw.circle(self.screen, (255, 0, 0), (int(pt[0]), int(pt[1])), 3)
 
         # Direction at head tip for face and headphones alignment.
-        hx_f, hy_f = front_curve[-1]
-        dir_x = hx_f - front_curve[-2][0]
-        dir_y = hy_f - front_curve[-2][1]
+        # Face downward toward the arena center.
+        hx_f, hy_f = float(head.x), float(head.y)
+        arena_watch_x = self.arena_x + self.arena_w * 0.5
+        arena_watch_y = self.arena_y + self.arena_h * 0.62
+        dir_x = arena_watch_x - hx_f
+        dir_y = arena_watch_y - hy_f
         norm = max(0.01, math.hypot(dir_x, dir_y))
         dir_x /= norm
         dir_y /= norm
@@ -2377,15 +2379,21 @@ class PygameArenaWindow:
                     for name, raw in skins_payload.items():
                         if isinstance(raw, dict):
                             self.skin_by_username[str(name)] = sanitize_skin(raw)
-                # Ensure our local skin stays authoritative for self-render
-                self.skin_by_username[self.username] = self.local_skin
-                self.snake_a_skin = self.skin_by_username.get(self.username, SnakeSkin())
-                opponent_name = next(
-                    (n for n in self.skin_by_username if n.casefold() != self.username.casefold()),
-                    None,
-                )
-                if opponent_name is not None:
-                    self.snake_b_skin = self.skin_by_username[opponent_name]
+                if self.spectator_mode:
+                    if self.match_players is not None:
+                        p1, p2 = self.match_players
+                        self.snake_a_skin = self.skin_by_username.get(p1, self.snake_a_skin)
+                        self.snake_b_skin = self.skin_by_username.get(p2, self.snake_b_skin)
+                else:
+                    # Ensure our local skin stays authoritative only for player view.
+                    self.skin_by_username[self.username] = self.local_skin
+                    self.snake_a_skin = self.skin_by_username.get(self.username, SnakeSkin())
+                    opponent_name = next(
+                        (n for n in self.skin_by_username if n.casefold() != self.username.casefold()),
+                        None,
+                    )
+                    if opponent_name is not None:
+                        self.snake_b_skin = self.skin_by_username[opponent_name]
                 self.last_server_message = f"Match started ({self.active_game_id})"
                 self._play_game_sound()
                 return
@@ -2565,6 +2573,11 @@ class PygameArenaWindow:
     def _sync_from_game_state(self, state: dict) -> None:
         old_a = list(self.snake_a)
         old_b = list(self.snake_b)
+        skins_payload = state.get("skins", {})
+        if isinstance(skins_payload, dict):
+            for name, raw in skins_payload.items():
+                if isinstance(raw, dict):
+                    self.skin_by_username[str(name)] = sanitize_skin(raw)
         snakes = state.get("snakes", [])
         if len(snakes) >= 2:
             n1 = str(snakes[0].get("player", "")).strip()
@@ -2603,19 +2616,27 @@ class PygameArenaWindow:
 
         if my_snake is not None:
             self.player_a_name = str(my_snake.get("player", self.player_a_name))
+            skin_raw = my_snake.get("skin")
+            if isinstance(skin_raw, dict):
+                self.skin_by_username[self.player_a_name] = sanitize_skin(skin_raw)
             body = my_snake.get("body", [])
             if body:
                 self.snake_a = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_a_health = int(my_snake.get("health", self.snake_a_health))
-            self.snake_a_skin = self.skin_by_username.get(self.player_a_name, self.local_skin)
+            fallback_a = SnakeSkin() if self.spectator_mode else self.local_skin
+            self.snake_a_skin = self.skin_by_username.get(self.player_a_name, fallback_a)
 
         if opp_snake is not None:
             self.player_b_name = str(opp_snake.get("player", self.player_b_name))
+            skin_raw = opp_snake.get("skin")
+            if isinstance(skin_raw, dict):
+                self.skin_by_username[self.player_b_name] = sanitize_skin(skin_raw)
             body = opp_snake.get("body", [])
             if body:
                 self.snake_b = [(int(seg.get("x", 0)), int(seg.get("y", 0))) for seg in body]
             self.snake_b_health = int(opp_snake.get("health", self.snake_b_health))
-            self.snake_b_skin = self.skin_by_username.get(self.player_b_name, self.snake_b_skin)
+            fallback_b = SnakeSkin() if self.spectator_mode else self.snake_b_skin
+            self.snake_b_skin = self.skin_by_username.get(self.player_b_name, fallback_b)
 
         pies_raw = state.get("pies", [])
         parsed_pies: dict[tuple[int, int], str] = {}
