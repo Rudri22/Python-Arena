@@ -2778,8 +2778,15 @@ class PygameArenaWindow:
     def _handle_direction_input(self, key: int) -> None:
         if key in self.direction_key_map:
             requested = self.direction_key_map[key]
-            if _OPPOSITE_DIRECTION.get(self.snake_a_direction) != requested:
-                self.snake_a_direction = requested
+            if _OPPOSITE_DIRECTION.get(self.snake_a_direction) == requested:
+                return
+            if requested == self.snake_a_direction:
+                return
+            self.snake_a_direction = requested
+            # Send immediately on direction change instead of waiting for the
+            # next MOVE_INTERVAL_MS boundary — eliminates up to 120 ms of lag.
+            self._send_movement_command(requested)
+            self.last_move_ms = pygame.time.get_ticks()
 
     def _update_movement(self) -> None:
         if self.show_result_screen or not self.connection_healthy:
