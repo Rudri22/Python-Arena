@@ -16,6 +16,9 @@ from shared.protocol import MessageType
 from shared.utils import encode_message_for_socket, split_socket_buffer
 
 
+# // Feature: Networking / P2P Chat
+# // Purpose: Best-effort local IP detection used for P2P endpoint advertisement.
+# // Trigger: Called by the networking / p2p chat flow when this helper is needed.
 def _detect_local_ip(server_ip: str) -> str:
     """Best-effort local IP detection used for P2P endpoint advertisement."""
 
@@ -32,6 +35,9 @@ def _detect_local_ip(server_ip: str) -> str:
 class _P2PChatNode:
     """Lightweight peer-chat transport over direct TCP connections."""
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'init' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def __init__(self, advertise_host: str) -> None:
         self.advertise_host = advertise_host
         self.username = ""
@@ -50,10 +56,16 @@ class _P2PChatNode:
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._accept_thread.start()
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'set username' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def set_username(self, username: str) -> None:
         with self._lock:
             self.username = str(username or "").strip()
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'set peer directory' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def set_peer_directory(self, peers: dict[str, Any]) -> None:
         parsed: dict[str, tuple[str, int]] = {}
         with self._lock:
@@ -72,12 +84,18 @@ class _P2PChatNode:
         with self._lock:
             self._peers = parsed
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'pop message' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def pop_message(self) -> dict[str, Any] | None:
         try:
             return self._inbox.get_nowait()
         except queue.Empty:
             return None
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Sends chat to synchronize this feature across client/server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def send_chat(
         self,
         *,
@@ -140,6 +158,9 @@ class _P2PChatNode:
             return False, f"P2P lobby chat failed for: {', '.join(failures[:4])}"
         return False, "P2P lobby chat failed."
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'close' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def close(self) -> None:
         self._running = False
         try:
@@ -147,6 +168,9 @@ class _P2PChatNode:
         except OSError:
             pass
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'accept loop' step of the networking / p2p chat system.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _accept_loop(self) -> None:
         while self._running:
             try:
@@ -157,6 +181,9 @@ class _P2PChatNode:
                 break
             threading.Thread(target=self._read_peer_conn, args=(conn,), daemon=True).start()
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'read peer conn' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def _read_peer_conn(self, conn: socket.socket) -> None:
         buffer = ""
         with conn:
@@ -191,6 +218,9 @@ class ClientConnection:
     JSON messages even when `recv` returns partial chunks.
     """
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Implements the 'init' step of the networking / p2p chat system.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def __init__(
         self,
         server_ip: str,
@@ -221,6 +251,9 @@ class ClientConnection:
         # This prevents message loss during bursts (online list + invitation).
         self._pending_messages: list[dict[str, Any]] = []
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Send one shared-protocol message to the server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def send_message(self, message: dict[str, Any]) -> None:
         """Send one shared-protocol message to the server."""
 
@@ -237,6 +270,9 @@ class ClientConnection:
 
         self.socket.sendall(encode_message_for_socket(message))
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Send a chat message directly to peers (not through the server).
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def send_chat_message(
         self,
         *,
@@ -256,6 +292,9 @@ class ClientConnection:
             game_id=game_id,
         )
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Receive and return the next complete protocol message.
+    # // Trigger: Triggered by incoming server/peer messages in the networking loop.
     def receive_message(self) -> dict[str, Any]:
         """
         Receive and return the next complete protocol message.
@@ -291,6 +330,9 @@ class ClientConnection:
 
             self._buffer += data.decode("utf-8", errors="replace")
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Close the underlying socket.
+    # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def close(self) -> None:
         """Close the underlying socket."""
 
@@ -302,6 +344,9 @@ class ClientConnection:
         self.socket.close()
         self._p2p_chat.close()
 
+    # // Feature: Networking / P2P Chat
+    # // Purpose: Handles online users for peer directory and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_online_users_for_peer_directory(self, message: dict[str, Any]) -> None:
         if message.get("type") != MessageType.ONLINE_USERS.value:
             return

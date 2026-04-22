@@ -32,6 +32,9 @@ _ALIASES: dict[str, str] = {
 }
 
 
+# // Feature: Controls Configuration
+# // Purpose: Implements the 'normalize key name' step of the controls configuration system.
+# // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
 def normalize_key_name(raw: str) -> str:
     key = str(raw or "").strip().lower().replace("_", " ")
     if not key:
@@ -43,6 +46,9 @@ def normalize_key_name(raw: str) -> str:
     return " ".join(part for part in key.split() if part)
 
 
+# // Feature: Controls Configuration
+# // Purpose: Implements the 'display key name' step of the controls configuration system.
+# // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
 def display_key_name(key_name: str) -> str:
     key = normalize_key_name(key_name)
     if not key:
@@ -67,6 +73,9 @@ def display_key_name(key_name: str) -> str:
     return key.title()
 
 
+# // Feature: Controls Configuration
+# // Purpose: Implements the 'sanitize bindings' step of the controls configuration system.
+# // Trigger: Called by the controls configuration flow when this helper is needed.
 def _sanitize_bindings(candidate: dict[str, str] | None) -> dict[str, str]:
     bindings = dict(DEFAULT_DIRECTION_BINDINGS)
     if not isinstance(candidate, dict):
@@ -87,6 +96,9 @@ def _sanitize_bindings(candidate: dict[str, str] | None) -> dict[str, str]:
     return bindings
 
 
+# // Feature: Controls Configuration
+# // Purpose: Implements the 'load direction bindings' step of the controls configuration system.
+# // Trigger: Called during initialization when assets or configuration are loaded.
 def load_direction_bindings() -> dict[str, str]:
     try:
         if not _SETTINGS_PATH.exists():
@@ -97,6 +109,9 @@ def load_direction_bindings() -> dict[str, str]:
         return dict(DEFAULT_DIRECTION_BINDINGS)
 
 
+# // Feature: Controls Configuration
+# // Purpose: Implements the 'save direction bindings' step of the controls configuration system.
+# // Trigger: Called by the controls configuration flow when this helper is needed.
 def save_direction_bindings(bindings: dict[str, str]) -> None:
     sanitized = _sanitize_bindings(bindings)
     _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)

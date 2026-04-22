@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -47,6 +47,9 @@ _SKIN_PREFS_PATH = Path(__file__).resolve().parent / "assets" / "skin_prefs.json
 _SOUNDS_DIR = Path(__file__).resolve().parents[1] / "assets" / "sounds"
 
 
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Loads and prepares skin prefs used by this feature.
+# // Trigger: Called during initialization when assets or configuration are loaded.
 def _load_skin_prefs() -> SnakeSkin:
     try:
         if _SKIN_PREFS_PATH.exists():
@@ -60,6 +63,9 @@ def _load_skin_prefs() -> SnakeSkin:
     return SnakeSkin()
 
 
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Implements the 'save skin prefs' step of the pre-lobby / lobby utilities system.
+# // Trigger: Called by the pre-lobby / lobby utilities flow when this helper is needed.
 def _save_skin_prefs(skin: SnakeSkin) -> None:
     try:
         from shared.protocol import skin_to_dict
@@ -94,6 +100,51 @@ How to read this file quickly:
 - Entry helpers (`run_prelobby_to_lobby`, `main`)
 """
 
+# Frontend feature names and ownership map.
+# Keep these IDs stable so backend and QA references stay aligned.
+PRELOBBY_FEATURES: dict[str, dict[str, str]] = {
+    "PRE_01_MUSIC_TOGGLE": {
+        "ui": "Top-left music icon button (music on/off).",
+        "frontend_owner": "PreLobby._music_center + PreLobby._handle_click + MusicController.toggle",
+        "backend_owner": "None (local-only audio toggle).",
+    },
+    "PRE_02_STATUS_BADGE": {
+        "ui": "Status badge: IDLE / TYPING / READY.",
+        "frontend_owner": "PreLobby._draw_ui (status derivation from name input state)",
+        "backend_owner": "None (local-only state feedback).",
+    },
+    "PRE_03_DEPLOY_NAME_INPUT": {
+        "ui": "Deploy name text box with cursor/editing and 0/16 counter.",
+        "frontend_owner": "PreLobby._events + PreLobby._draw_ui",
+        "backend_owner": "Validated and registered in lobby via USERNAME message (PygameLobbyScene._connect/_retry_username_if_due).",
+    },
+    "PRE_04_SUGGESTED_NAMES": {
+        "ui": "Suggested-name pills under the input.",
+        "frontend_owner": "PreLobby.suggestions + PreLobby._suggestion_rects + PreLobby._handle_click",
+        "backend_owner": "None (local-only autofill helpers).",
+    },
+    "PRE_05_DEPLOY_BUTTON": {
+        "ui": "DEPLOY action button.",
+        "frontend_owner": "PreLobby._deploy_rect + PreLobby._handle_click + PreLobby._attempt_deploy",
+        "backend_owner": "Triggers lobby entry, then USERNAME submission to server in PygameLobbyScene.",
+    },
+    "PRE_06_DEPLOY_TRANSITION": {
+        "ui": "Eye-close/blackout transition from pre-lobby into lobby.",
+        "frontend_owner": "PreLobby._deploy_close_progress + PreLobby.update + PreLobby.draw",
+        "backend_owner": "None (local scene transition).",
+    },
+    "LOB_01_USERNAME_SUBMISSION": {
+        "ui": "Post-deploy username handoff to multiplayer lobby.",
+        "frontend_owner": "PygameLobbyScene._connect + make_username_message",
+        "backend_owner": "server/client_handler.py -> handle_incoming_message(MessageType.USERNAME)",
+    },
+    "LOB_02_ONLINE_AND_LEADERBOARD_SYNC": {
+        "ui": "Online list + leaderboard data refresh.",
+        "frontend_owner": "PygameLobbyScene._handle_message for ONLINE_USERS payload updates",
+        "backend_owner": "server/client_handler.py -> broadcast_online_users + server/state.py snapshots",
+    },
+}
+
 WIDTH = 1280
 HEIGHT = 720
 FPS = 60
@@ -116,20 +167,32 @@ EXP_ORANGE = (236, 170, 70)
 EXP_RED = (220, 96, 102)
 
 
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Implements the 'lerp' step of the pre-lobby / lobby utilities system.
+# // Trigger: Called by the pre-lobby / lobby utilities flow when this helper is needed.
 def lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Implements the 'lerp color' step of the pre-lobby / lobby utilities system.
+# // Trigger: Called by the pre-lobby / lobby utilities flow when this helper is needed.
 def lerp_color(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
     return (int(lerp(a[0], b[0], t)), int(lerp(a[1], b[1], t)), int(lerp(a[2], b[2], t)))
 
 
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Implements the 'draw round rect' step of the pre-lobby / lobby utilities system.
+# // Trigger: Called by the pre-lobby / lobby utilities flow when this helper is needed.
 def draw_round_rect(surface: pygame.Surface, rect: pygame.Rect, color: tuple[int, int, int, int] | tuple[int, int, int], radius: int, width: int = 0) -> None:
     pygame.draw.rect(surface, color, rect, border_radius=radius, width=width)
 
 
 class MusicController:
     """Handles generated loop music + short SFX (eat/error) for pre-lobby feedback."""
+    # // Feature: Audio
+    # // Purpose: Implements the 'init' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def __init__(self) -> None:
         self.ready = False
         self.playing = False
@@ -139,6 +202,9 @@ class MusicController:
         self.chomp_sound: pygame.mixer.Sound | None = None
         self.error_sound: pygame.mixer.Sound | None = None
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'init' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def init(self) -> None:
         if self.ready:
             return
@@ -161,9 +227,15 @@ class MusicController:
         except Exception:
             self.ready = False
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'unique wav path' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def _unique_wav_path(self, prefix: str) -> Path:
         return Path(tempfile.gettempdir()) / f"{prefix}_{uuid4().hex}.wav"
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'make loop' step of the audio system.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _make_loop(self) -> Path:
         sample_rate = 22050
         length = int(sample_rate * 2.4)
@@ -187,6 +259,9 @@ class MusicController:
             wf.writeframes(out.tobytes())
         return temp
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'make numm' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def _make_numm(self) -> Path:
         sample_rate = 22050
         duration = 0.18
@@ -209,6 +284,9 @@ class MusicController:
             wf.writeframes(data.tobytes())
         return temp
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'make error buzz' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def _make_error_buzz(self) -> Path:
         sample_rate = 22050
         duration = 0.20
@@ -228,25 +306,33 @@ class MusicController:
             wf.writeframes(data.tobytes())
         return temp
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'toggle' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def toggle(self) -> bool:
         self.init()
         if not self.ready:
             return False
-        if self.playing:
+        if pygame.mixer.music.get_busy():
             pygame.mixer.music.pause()
             self.playing = False
         else:
-            if pygame.mixer.music.get_pos() < 0:
+            pygame.mixer.music.unpause()
+            if not pygame.mixer.music.get_busy():
                 pygame.mixer.music.play(-1)
-            else:
-                pygame.mixer.music.unpause()
             self.playing = True
         return self.playing
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'play numm' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def play_numm(self) -> None:
         if self.ready and self.chomp_sound is not None:
             self.chomp_sound.play()
 
+    # // Feature: Audio
+    # // Purpose: Implements the 'play error' step of the audio system.
+    # // Trigger: Called by the audio flow when this helper is needed.
     def play_error(self) -> None:
         if self.ready and self.error_sound is not None:
             self.error_sound.play()
@@ -269,6 +355,9 @@ class Particle:
     color: tuple[int, int, int]
     radius: float
 
+    # // Feature: Pre-Lobby / Lobby Utilities
+    # // Purpose: Updates runtime state for update without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def update(self) -> None:
         self.pos += self.vel
         self.vel *= 0.96
@@ -284,6 +373,9 @@ class Smoke:
     max_life: int
     radius: float
 
+    # // Feature: Pre-Lobby / Lobby Utilities
+    # // Purpose: Updates runtime state for update without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def update(self) -> None:
         self.pos += self.vel
         self.vel.x *= 0.98
@@ -312,6 +404,9 @@ class SnakeUnit:
     panic_timer: int = 0
     panic_target: pygame.Vector2 | None = None
 
+    # // Feature: Pre-Lobby / Lobby Utilities
+    # // Purpose: Implements the 'head' step of the pre-lobby / lobby utilities system.
+    # // Trigger: Called by the pre-lobby / lobby utilities flow when this helper is needed.
     def head(self) -> pygame.Vector2:
         return self.body[0]
 
@@ -333,12 +428,16 @@ class PreLobby:
     - Deploy transition:
       `_deploy_close_progress`, `update`, `draw`, `run`
     """
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'init' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def __init__(
         self,
         *,
         initial_username: str = "",
         error_message: str = "",
         username_validator: Callable[[str], tuple[bool, str]] | None = None,
+        initial_music_on: bool = True,
     ) -> None:
         pygame.init()
         pygame.display.set_caption("Snake Arena - Deployment Lobby")
@@ -356,7 +455,16 @@ class PreLobby:
         self.deploy_target_name: str | None = None
 
         self.music = MusicController()
-        self.music_on = self.music.toggle()
+        self.music_on = False
+        if initial_music_on:
+            self.music_on = self.music.toggle()
+        else:
+            self.music.init()
+            try:
+                if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+                    pygame.mixer.music.pause()
+            except Exception:
+                pass
 
         self.skin_idx = 0
         self.name_text = initial_username[:16]
@@ -386,6 +494,9 @@ class PreLobby:
         self.music_icon_on = self._load_asset_icon("music.png")
         self.music_icon_off = self._load_asset_icon("no-music.png")
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Loads and prepares asset icon used by this feature.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_asset_icon(self, filename: str) -> pygame.Surface | None:
         icon_path = Path(__file__).resolve().parent / "assets" / filename
         if not icon_path.exists():
@@ -395,6 +506,9 @@ class PreLobby:
         except pygame.error:
             return None
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'spawn snakes' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _spawn_snakes(self) -> None:
         pool = SKINS.copy()
         random.shuffle(pool)
@@ -413,6 +527,9 @@ class PreLobby:
             )
             self.snakes.append(SnakeUnit(body=body, velocity=vel, target=target, speed=speed, phase=random.uniform(0, math.tau), primary=c1, secondary=c2, name=f"unit_{i+1}"))
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'respawn snake' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _respawn_snake(self, snake: SnakeUnit) -> None:
         side = random.choice(("left", "right"))
         if side == "left":
@@ -434,6 +551,9 @@ class PreLobby:
         snake.respawn_timer = random.randint(20, 70)
         snake.alpha = 0.0
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'segment alpha' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _segment_alpha(self, pt: pygame.Vector2) -> float:
         margin = 95.0
         dx = 0.0
@@ -451,6 +571,9 @@ class PreLobby:
             return 1.0
         return max(0.0, 1.0 - min(1.0, dist / margin))
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'spawn explosion' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _spawn_explosion(self, pos: pygame.Vector2) -> None:
         for _ in range(15):
             ang = random.uniform(0, math.tau)
@@ -477,6 +600,9 @@ class PreLobby:
                 )
             )
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'spawn crumb burst' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _spawn_crumb_burst(self, pos: pygame.Vector2) -> None:
         crumb_palette = [(244, 196, 112), (216, 142, 74), (168, 96, 58), (255, 224, 140)]
         for _ in range(22):
@@ -494,6 +620,9 @@ class PreLobby:
                 )
             )
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'throw food' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _throw_food(self, x: float, y: float) -> None:
         # Never place food inside the central panel area.
         intro_t = min(1.0, (pygame.time.get_ticks() - self.ui_intro_ms) / 600.0)
@@ -506,6 +635,9 @@ class PreLobby:
             self.food_pellets.pop(0)
         self.food_pellets.append(FoodPellet(pos=pygame.Vector2(x, y), life=360))
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'trigger scatter' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _trigger_scatter(self, eater_index: int, eaten_food_index: int | None = None, contenders: list[int] | None = None) -> None:
         # Remove only the eaten pellet.
         if eaten_food_index is not None and 0 <= eaten_food_index < len(self.food_pellets):
@@ -529,6 +661,9 @@ class PreLobby:
             if i == eater_index:
                 snake.panic_timer = random.randint(45, 85)
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Updates runtime state for snakes without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_snakes(self) -> None:
         eater_index: int | None = None
         eaten_food_index: int | None = None
@@ -617,6 +752,9 @@ class PreLobby:
                 contenders.append(eater_index)
             self._trigger_scatter(eater_index, eaten_food_index, contenders)
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Updates runtime state for effects without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_effects(self) -> None:
         alive_p: list[Particle] = []
         for p in self.particles:
@@ -634,6 +772,9 @@ class PreLobby:
 
         # Food pellets persist until eaten.
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'bg gradient' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _bg_gradient(self, surf: pygame.Surface) -> None:
         half = self.h // 2
         for y in range(self.h):
@@ -645,6 +786,9 @@ class PreLobby:
                 c = lerp_color(BG_MID, BG_BOTTOM, t)
             pygame.draw.line(surf, c, (0, y), (self.w, y))
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Renders background for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_background(self, surf: pygame.Surface) -> None:
         self._bg_gradient(surf)
 
@@ -790,6 +934,9 @@ class PreLobby:
         pygame.draw.rect(vignette, (0, 0, 0, 40), vignette.get_rect(), width=80, border_radius=18)
         surf.blit(vignette, (0, 0))
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Renders snakes for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_snakes(self, surf: pygame.Surface) -> None:
         for idx, snake in enumerate(self.snakes):
             if snake.respawn_timer > 0:
@@ -855,6 +1002,9 @@ class PreLobby:
                 pygame.draw.line(surf, (230, 70, 70), tongue_tip, tongue_tip - fork, 1)
 
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Renders effects for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_effects(self, surf: pygame.Surface) -> None:
         # dropped food bait
         for f in self.food_pellets:
@@ -880,27 +1030,46 @@ class PreLobby:
             pygame.draw.circle(spark, (p.color[0], p.color[1], p.color[2], alpha), (r + 1, r + 1), r)
             surf.blit(spark, (p.pos.x - r, p.pos.y - r))
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'card rect' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _card_rect(self) -> pygame.Rect:
         return pygame.Rect(self.w // 2 - 285, self.h // 2 - 215, 570, 430)
 
+    # Feature: PRE_01_MUSIC_TOGGLE (music button anchor point).
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'music center' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _music_center(self) -> pygame.Vector2:
         return pygame.Vector2(92, 84)
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'input rect' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _input_rect(self) -> pygame.Rect:
         card = self._card_rect()
         width = card.width - 120
         return pygame.Rect(card.centerx - width // 2, card.y + 198, width, 54)
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'deploy rect' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _deploy_rect(self) -> pygame.Rect:
         card = self._card_rect()
         return pygame.Rect(card.centerx - 130, card.y + 360, 260, 50)
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'name is valid' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _name_is_valid(self) -> bool:
         text = self.name_text.strip()
         if len(text) < 3:
             return False
         return all(ch.isalnum() or ch in ("_", "-", " ") for ch in text)
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Centered bounded layout, supports 4+2 style row wrapping.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _suggestion_rects(self, input_rect: pygame.Rect, card: pygame.Rect) -> list[pygame.Rect]:
         """Centered bounded layout, supports 4+2 style row wrapping."""
         gap = 8
@@ -930,6 +1099,9 @@ class PreLobby:
                 x += w + gap
         return rects
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Renders mascot for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_mascot(self, surf: pygame.Surface, anchor: tuple[int, int], look_at: tuple[int, int]) -> None:
         x, y = anchor
         typing = len(self.name_text) > 0
@@ -1001,6 +1173,11 @@ class PreLobby:
             pygame.draw.line(surf, (130, 156, 198), (head_x - 16, arm_y), (head_x - 28, arm_y + 2), 4)
             pygame.draw.line(surf, (130, 156, 198), (head_x + 16, arm_y), (head_x + 28, arm_y + 2), 4)
 
+    # Features: PRE_01_MUSIC_TOGGLE, PRE_02_STATUS_BADGE, PRE_03_DEPLOY_NAME_INPUT,
+    # PRE_04_SUGGESTED_NAMES, PRE_05_DEPLOY_BUTTON.
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Renders ui for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_ui(self, surf: pygame.Surface, bg_under: pygame.Surface | None = None) -> None:
         intro_t = min(1.0, (pygame.time.get_ticks() - self.ui_intro_ms) / 600.0)
         ease = 1 - (1 - intro_t) ** 3
@@ -1160,7 +1337,6 @@ class PreLobby:
 
         # suggestion pills (centered and kept inside card)
         self.hovered_suggestion = -1
-        sug_icons = ["~", "*", "+", "#", "@", "%"]
         for i, (sug, pill) in enumerate(zip(self.suggestions, self._suggestion_rects(input_rect, card))):
             hov = pill.collidepoint(mouse)
             if hov:
@@ -1170,10 +1346,8 @@ class PreLobby:
             fill = (24, 48, 80, 238) if not hov else (34, 68, 104, 248)
             draw_round_rect(surf, pill, fill, 12)
             draw_round_rect(surf, pill, (68, 122, 180) if not hov else (72, 214, 152), 12, 1)
-            icon_txt = self.small.render(sug_icons[i % len(sug_icons)], True, (72, 214, 152))
             label = self.small.render(sug, True, (208, 220, 236))
-            surf.blit(icon_txt, (pill.x + 10, pill.y + 8))
-            surf.blit(label, (pill.x + 32, pill.y + 8))
+            surf.blit(label, (pill.x + 12, pill.y + 8))
 
         # top-left music control (restored)
         m = self._music_center() + pygame.Vector2(0, dy)
@@ -1264,6 +1438,10 @@ class PreLobby:
                 reveal = bg_under.subsurface(reveal_rect).copy()
                 reveal.set_alpha(fade_alpha)
                 surf.blit(reveal, reveal_rect.topleft)
+    # Features: PRE_01_MUSIC_TOGGLE, PRE_03_DEPLOY_NAME_INPUT, PRE_04_SUGGESTED_NAMES, PRE_05_DEPLOY_BUTTON.
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Handles click and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_click(self, pos: tuple[int, int]) -> bool:
         m = self._music_center()
         input_rect = self._input_rect()
@@ -1307,6 +1485,10 @@ class PreLobby:
 
         return handled_ui
 
+    # Features: PRE_03_DEPLOY_NAME_INPUT, PRE_05_DEPLOY_BUTTON (mouse/keyboard deploy flow).
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'events' step of the pre-lobby ui system.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _events(self) -> None:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
@@ -1354,6 +1536,9 @@ class PreLobby:
                     self.name_cursor = min(len(self.name_text), self.name_cursor + 1)
                     self.error_message = ""
 
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'cursor index from x' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _cursor_index_from_x(
         self,
         font: pygame.font.Font,
@@ -1369,6 +1554,10 @@ class PreLobby:
                 return idx
         return len(text)
 
+    # Feature: PRE_05_DEPLOY_BUTTON (validation + deploy trigger).
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'attempt deploy' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _attempt_deploy(self) -> None:
         candidate = self.name_text.strip()
         if not self._name_is_valid():
@@ -1388,12 +1577,20 @@ class PreLobby:
         self.deploy_transition_active = True
         self.deploy_transition_start_ms = pygame.time.get_ticks()
 
+    # Feature: PRE_06_DEPLOY_TRANSITION.
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Implements the 'deploy close progress' step of the pre-lobby ui system.
+    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
     def _deploy_close_progress(self) -> float:
         if not self.deploy_transition_active:
             return 0.0
         elapsed = pygame.time.get_ticks() - self.deploy_transition_start_ms
         return min(1.0, max(0.0, elapsed / max(1, self.deploy_transition_duration_ms)))
 
+    # Feature: PRE_06_DEPLOY_TRANSITION (ends scene when close animation completes).
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Updates runtime state for update without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def update(self) -> None:
         self.frame += 1
         self._update_snakes()
@@ -1404,6 +1601,10 @@ class PreLobby:
         if self.invalid_feedback_frames > 0:
             self.invalid_feedback_frames -= 1
 
+    # Features: PRE_02_STATUS_BADGE, PRE_06_DEPLOY_TRANSITION (render step).
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Renders draw for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def draw(self) -> None:
         frame = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
         self._draw_background(frame)
@@ -1421,6 +1622,10 @@ class PreLobby:
         self.screen.blit(frame, (0, 0))
         pygame.display.flip()
 
+    # Features: PRE_03_DEPLOY_NAME_INPUT, PRE_05_DEPLOY_BUTTON, PRE_06_DEPLOY_TRANSITION (main loop).
+    # // Feature: Pre-Lobby UI
+    # // Purpose: Coordinates the top-level execution flow for this part of the game.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def run(self, *, keep_pygame: bool = False) -> tuple[str | None, int]:
         while self.running:
             self._events()
@@ -1455,6 +1660,9 @@ class PygameLobbyScene:
       `_events`, `run`
     """
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'init' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def __init__(
         self,
         *,
@@ -1463,6 +1671,7 @@ class PygameLobbyScene:
         username: str,
         server_ip: str,
         server_port: int,
+        music_enabled: bool = True,
     ) -> None:
         self.screen = screen
         self.clock = clock
@@ -1470,6 +1679,7 @@ class PygameLobbyScene:
         self.username = username
         self.server_ip = server_ip
         self.server_port = server_port
+        self.music_enabled = bool(music_enabled)
         self.w, self.h = self.screen.get_size()
         self.running = True
         self.return_to_prelobby = False
@@ -1488,7 +1698,6 @@ class PygameLobbyScene:
         self.font_snake_panel = pygame.font.SysFont("papyrus", 36, bold=True)
         self.font_cinzel = pygame.font.SysFont("Cinzel Decorative", 15, bold=True)
         self.cup_icon = self._load_asset_icon("cup.gif")
-        self.eye_icon = self._load_asset_icon("eye.png")
         self.rank1_icon = self._load_asset_icon("rank1.png")
         self.rank2_icon = self._load_asset_icon("rank2.png")
         self.rank3_icon = self._load_asset_icon("rank3.png")
@@ -1579,14 +1788,21 @@ class PygameLobbyScene:
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
-            if not pygame.mixer.music.get_busy():
-                lobby_file = _SOUNDS_DIR / "preolobby-lobby.mpeg"
-                if lobby_file.exists():
-                    pygame.mixer.music.load(str(lobby_file))
-                    pygame.mixer.music.play(-1)
+            if self.music_enabled:
+                if not pygame.mixer.music.get_busy():
+                    lobby_file = _SOUNDS_DIR / "preolobby-lobby.mpeg"
+                    if lobby_file.exists():
+                        pygame.mixer.music.load(str(lobby_file))
+                        pygame.mixer.music.play(-1)
+            else:
+                if pygame.mixer.music.get_busy():
+                    pygame.mixer.music.pause()
         except Exception:
             pass
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Loads and prepares asset icon used by this feature.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_asset_icon(self, filename: str) -> pygame.Surface | None:
         icon_path = Path(__file__).resolve().parent / "assets" / filename
         if not icon_path.exists():
@@ -1596,6 +1812,9 @@ class PygameLobbyScene:
         except pygame.error:
             return None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Loads and prepares input prompt asset used by this feature.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_input_prompt_asset(self, relative_path: str) -> pygame.Surface | None:
         asset_path = Path(__file__).resolve().parent / "assets" / "input_prompts" / relative_path
         if not asset_path.exists():
@@ -1605,6 +1824,9 @@ class PygameLobbyScene:
         except pygame.error:
             return None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Draw a snake + clothing badge icon for skin selection.
+    # // Trigger: Called every frame during the render phase.
     def _draw_skin_wardrobe_icon(self, surf: pygame.Surface, center: tuple[int, int]) -> None:
         """Draw a snake + clothing badge icon for skin selection."""
         cx, cy = center
@@ -1629,6 +1851,9 @@ class PygameLobbyScene:
         pygame.draw.polygon(badge, (255, 211, 94), shirt_pts)
         surf.blit(badge, (cx + 10, cy + 8))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Scale icon and clear matte backgrounds (white/gray/flat corner color).
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _prepare_icon_transparent_bg(self, icon: pygame.Surface, size: tuple[int, int]) -> pygame.Surface:
         """Scale icon and clear matte backgrounds (white/gray/flat corner color)."""
         out = pygame.transform.smoothscale(icon, size).convert_alpha()
@@ -1643,6 +1868,9 @@ class PygameLobbyScene:
             out.get_at((w - 1, h - 1)),
         ]
 
+        # // Feature: Lobby UI / Matchmaking
+        # // Purpose: Implements the 'is similar' step of the lobby ui / matchmaking system.
+        # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
         def is_similar(a: pygame.Color, b: pygame.Color, tol: int = 58) -> bool:
             return abs(int(a.r) - int(b.r)) + abs(int(a.g) - int(b.g)) + abs(int(a.b) - int(b.b)) <= tol
 
@@ -1671,17 +1899,26 @@ class PygameLobbyScene:
                     out.set_at((x, y), pygame.Color(r, g, b, 0))
         return out
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'append log' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _append_log(self, text: str) -> None:
         self.logs.append(text)
         if len(self.logs) > 16:
             self.logs = self.logs[-16:]
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'append chat bubble' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _append_chat_bubble(self, sender: str, message: str) -> None:
         is_self = sender.casefold() == self.username.casefold()
         self.chat_bubbles.append((sender, message, is_self))
         if len(self.chat_bubbles) > 40:
             self.chat_bubbles = self.chat_bubbles[-40:]
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'remember private tab' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _remember_private_tab(self, username: str) -> None:
         if not username or username.casefold() == self.username.casefold():
             return
@@ -1691,6 +1928,9 @@ class PygameLobbyScene:
         if len(self.private_chat_tabs) > 10:
             self.private_chat_tabs = self.private_chat_tabs[-10:]
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'append private chat bubble' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _append_private_chat_bubble(self, partner: str, sender: str, message: str) -> None:
         if not partner or partner.casefold() == self.username.casefold():
             return
@@ -1703,6 +1943,9 @@ class PygameLobbyScene:
         if self.active_private_target is None:
             self.active_private_target = partner
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set private target' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_private_target(self, username: str | None) -> None:
         if username is None:
             return
@@ -1712,16 +1955,26 @@ class PygameLobbyScene:
         self._remember_private_tab(cleaned)
         self.active_private_target = cleaned
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'is chat enabled' step of the lobby ui / matchmaking system.
+    # // Trigger: Called before state changes to enforce game and input rules.
     def _is_chat_enabled(self) -> bool:
         if self.chat_mode == "public":
             return True
         return self.active_private_target is not None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'current chat bubbles' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _current_chat_bubbles(self) -> list[tuple[str, str, bool]]:
         if self.chat_mode == "private" and self.active_private_target is not None:
             return self.private_chat_threads.get(self.active_private_target, [])
         return self.chat_bubbles
 
+    # Feature: LOB_01_USERNAME_SUBMISSION (send username + skin + chat endpoint).
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Establishes the connection required for this feature and initializes related runtime state.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _connect(self) -> None:
         try:
             self.connection = ClientConnection(server_ip=self.server_ip, server_port=self.server_port)
@@ -1744,6 +1997,10 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Username submit failed: {error}")
 
+    # Feature: LOB_01_USERNAME_SUBMISSION (retry path when username collision happens).
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'retry username if due' step of the lobby ui / matchmaking system.
+    # // Trigger: Triggered by timed retry logic when a previous network action failed or is pending.
     def _retry_username_if_due(self) -> None:
         if self.connection is None:
             return
@@ -1766,6 +2023,9 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Username retry failed: {error}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'retry quick match if due' step of the lobby ui / matchmaking system.
+    # // Trigger: Triggered by timed retry logic when a previous network action failed or is pending.
     def _retry_quick_match_if_due(self) -> None:
         quick_label, _, _ = self._quick_action_state()
         if quick_label != "QUICK MATCH":
@@ -1793,6 +2053,9 @@ class PygameLobbyScene:
             self.quick_match_waiting = False
             self._append_log(f"[ERROR] Quick Match retry failed: {error}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Closes active connections and cleans up related runtime state for this feature.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _disconnect(self) -> None:
         if self.connection is not None:
             if self.start_game:
@@ -1814,6 +2077,9 @@ class PygameLobbyScene:
                 pass
             self.connection = None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'receiver loop' step of the lobby ui / matchmaking system.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _receiver_loop(self) -> None:
         while self.running and self.connection is not None:
             try:
@@ -1828,6 +2094,9 @@ class PygameLobbyScene:
                 break
             self.incoming_queue.put(msg)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'drain queue' step of the lobby ui / matchmaking system.
+    # // Trigger: Triggered by incoming server/peer messages in the networking loop.
     def _drain_queue(self) -> None:
         while True:
             try:
@@ -1836,6 +2105,10 @@ class PygameLobbyScene:
                 break
             self._handle_message(msg)
 
+    # Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (consumes ONLINE_USERS snapshots).
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Handles message and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_message(self, message: dict[str, Any]) -> None:
         msg_type = message.get("type")
         payload = message.get("payload", {})
@@ -2108,6 +2381,9 @@ class PygameLobbyScene:
             return
         self._append_log(f"[INCOMING] {message}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'extract opponent from match' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _extract_opponent_from_match(self, payload: dict[str, Any]) -> str | None:
         players = payload.get("players")
         if isinstance(players, list):
@@ -2122,6 +2398,9 @@ class PygameLobbyScene:
                 return candidate
         return None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'match event targets self' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _match_event_targets_self(self, payload: dict[str, Any]) -> bool:
         me = self.username.casefold()
         from_user = str(payload.get("from_user", "")).casefold()
@@ -2135,6 +2414,9 @@ class PygameLobbyScene:
                     return True
         return False
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'selected opponent' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _selected_opponent(self) -> str | None:
         lobby_users = self._lobby_online_users()
         if self.selected_index < 0 or self.selected_index >= len(lobby_users):
@@ -2144,6 +2426,9 @@ class PygameLobbyScene:
             return None
         return selected
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Sends invite to synchronize this feature across client/server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _send_invite(self, explicit_target: str | None = None) -> None:
         if self.quick_match_waiting:
             self._append_log("[MATCH] Cancel Quick Match before sending invites.")
@@ -2169,12 +2454,18 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Invite failed: {error}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'remove outgoing pending' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _remove_outgoing_pending(self, username: str) -> None:
         self.outgoing_pending_invites = [u for u in self.outgoing_pending_invites if u.casefold() != username.casefold()]
         self.invite_status_by_user.pop(username, None)
         if self.pending_invite_request_target and self.pending_invite_request_target.casefold() == username.casefold():
             self.pending_invite_request_target = None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'cancel outgoing invite' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _cancel_outgoing_invite(self, username: str) -> None:
         if self.connection is None:
             return
@@ -2191,6 +2482,9 @@ class PygameLobbyScene:
             self._append_log(f"[ERROR] Invite cancel failed: {error}")
         self._remove_outgoing_pending(username)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'typed invite target valid' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _typed_invite_target_valid(self) -> bool:
         target = self.invite_name_text.strip()
         if not target:
@@ -2200,9 +2494,15 @@ class PygameLobbyScene:
         online_casefold = {u.casefold() for u in self.online_users}
         return target.casefold() in online_casefold
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'has outgoing pending' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _has_outgoing_pending(self) -> bool:
         return len(self.outgoing_pending_invites) > 0 or self.pending_invite_request_target is not None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Sends chat to synchronize this feature across client/server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _send_chat(self) -> None:
         text = self.chat_text.strip()
         if not text or self.connection is None or not self._is_chat_enabled():
@@ -2234,6 +2534,9 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Chat failed: {error}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat panel rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_panel_rect(self) -> pygame.Rect:
         center = self._logs_rect()
         top_panel = self._center_top_rect()
@@ -2245,23 +2548,38 @@ class PygameLobbyScene:
             max(120, center.bottom - chat_top - 56),
         )
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'visible pending invites' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _visible_pending_invites(self, max_items: int | None = None) -> list[str]:
         if max_items is None:
             max_items = self._incoming_invites_visible_count()
         start = max(0, self.pending_invites_scroll)
         return self.pending_invites[start : start + max_items]
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'incoming invites visible count' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _incoming_invites_visible_count(self) -> int:
         return 2
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat visible count' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_visible_count(self) -> int:
         chat_area = self._chat_panel_rect()
         bubble_area = pygame.Rect(chat_area.x + 8, chat_area.y + 8, chat_area.width - 16, chat_area.height - 16)
         return max(2, bubble_area.height // 42)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat max scroll' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_max_scroll(self) -> int:
         return max(0, len(self._current_chat_bubbles()) - self._chat_visible_count())
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat scrollbar parts' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
         chat_area = self._chat_panel_rect()
         bubble_area = pygame.Rect(chat_area.x + 8, chat_area.y + 8, chat_area.width - 16, chat_area.height - 16)
@@ -2271,6 +2589,9 @@ class PygameLobbyScene:
         track = pygame.Rect(bar.x, up.bottom + 2, bar.width, max(8, down.y - (up.bottom + 2)))
         return up, down, track
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat scroll thumb rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_scroll_thumb_rect(self) -> pygame.Rect | None:
         total = len(self._current_chat_bubbles())
         visible = self._chat_visible_count()
@@ -2284,6 +2605,9 @@ class PygameLobbyScene:
         thumb_y = track.y + int((track.height - thumb_h) * top_ratio)
         return pygame.Rect(track.x + 3, thumb_y, track.width - 6, thumb_h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set chat scroll from thumb y' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_chat_scroll_from_thumb_y(self, thumb_y: int, thumb_h: int) -> None:
         _, _, track = self._chat_scrollbar_parts()
         travel = max(1, track.height - thumb_h)
@@ -2291,6 +2615,9 @@ class PygameLobbyScene:
         ratio = (clamped_y - track.y) / travel
         self.chat_scroll = int(round((1.0 - ratio) * self._chat_max_scroll()))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat tabs layout' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_tabs_layout(self, chat_area: pygame.Rect) -> tuple[pygame.Rect, list[tuple[str, pygame.Rect]]]:
         tab_y = chat_area.y - 27
         public_tab = pygame.Rect(chat_area.x + 8, tab_y, 98, 24)
@@ -2303,21 +2630,33 @@ class PygameLobbyScene:
             start_x += tab_w + 6
         return public_tab, private_tabs
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat target options' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_target_options(self) -> list[str]:
         opts = ["Lobby Chat"]
         for partner in self.private_chat_tabs[-10:]:
             opts.append(partner)
         return opts
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat target rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_target_rect(self) -> pygame.Rect:
         send = self._chat_send_rect()
         return pygame.Rect(send.x - 156, send.y, 148, send.height)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat target label' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_target_label(self) -> str:
         if self.chat_mode == "private" and self.active_private_target:
             return self.active_private_target
         return "Lobby Chat"
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set chat target' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_chat_target(self, label: str) -> None:
         if label == "Lobby Chat":
             self.chat_mode = "public"
@@ -2326,35 +2665,59 @@ class PygameLobbyScene:
             self._set_private_target(label)
             self.chat_mode = "private"
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat target dropdown rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_target_dropdown_rect(self) -> pygame.Rect:
         t = self._chat_target_rect()
         visible = self._chat_target_visible_count()
         return pygame.Rect(t.x, t.y - (visible * 26) - 6, t.width, visible * 26)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat target visible count' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_target_visible_count(self) -> int:
         return min(6, len(self._chat_target_options()))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat target option rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_target_option_rect(self, visible_index: int) -> pygame.Rect:
         dd = self._chat_target_dropdown_rect()
         return pygame.Rect(dd.x, dd.y + visible_index * 26, dd.width, 24)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'player popup rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _player_popup_rect(self) -> pygame.Rect:
         width = 280
         height = 150
         return pygame.Rect((self.w - width) // 2, (self.h - height) // 2, width, height)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'player popup invite rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _player_popup_invite_rect(self) -> pygame.Rect:
         popup = self._player_popup_rect()
         return pygame.Rect(popup.x + 16, popup.y + 84, 78, 32)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'player popup chat rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _player_popup_chat_rect(self) -> pygame.Rect:
         popup = self._player_popup_rect()
         return pygame.Rect(popup.x + 102, popup.y + 84, 78, 32)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'player popup close rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _player_popup_close_rect(self) -> pygame.Rect:
         popup = self._player_popup_rect()
         return pygame.Rect(popup.x + 188, popup.y + 84, 78, 32)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'reply invite' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _reply_invite(self, accept: bool, from_user: str | None = None) -> None:
         inviter = from_user or self.pending_invite_from or (self.pending_invites[0] if self.pending_invites else None)
         if inviter is None or self.connection is None:
@@ -2376,31 +2739,52 @@ class PygameLobbyScene:
         self.pending_invites_scroll = min(self.pending_invites_scroll, max_scroll)
         self.pending_invite_from = self.pending_invites[0] if self.pending_invites else None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'users rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _users_rect(self) -> pygame.Rect:
         # Right top panel: leaderboard
         width = 320
         height = min(320, self.h - 300)
         return pygame.Rect(self.w - width - 32, 120, width, height)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'left panel rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _left_panel_rect(self) -> pygame.Rect:
         return pygame.Rect(32, 120, 330, self.h - 180)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin change button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_change_button_rect(self) -> pygame.Rect:
         left = self._left_panel_rect()
         return pygame.Rect(left.right - 136, left.y + 10, 122, 28)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin change action rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_change_action_rect(self) -> pygame.Rect:
         left = self._left_panel_rect()
         return pygame.Rect(left.x + 22, left.y + 258, left.width - 44, 86)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin prev rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_prev_rect(self) -> pygame.Rect:
         left = self._left_panel_rect()
         return pygame.Rect(left.x + 20, left.y + 266, 30, 30)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin next rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_next_rect(self) -> pygame.Rect:
         left = self._left_panel_rect()
         return pygame.Rect(left.right - 50, left.y + 266, 30, 30)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin dot rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_dot_rect(self, idx: int) -> pygame.Rect:
         left = self._left_panel_rect()
         total = len(self.skin_color_keys)
@@ -2412,6 +2796,9 @@ class PygameLobbyScene:
         cy = left.y + 282
         return pygame.Rect(cx - r, cy - r, r * 2, r * 2)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'logs rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _logs_rect(self) -> pygame.Rect:
         # Center column container
         left_w = 330
@@ -2420,6 +2807,9 @@ class PygameLobbyScene:
         width = max(340, self.w - (x + right_w + 52))
         return pygame.Rect(x, 120, width, self.h - 180)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'right rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _right_rect(self) -> pygame.Rect:
         # Right lower panel: online players/friends (swapped with invitations)
         # Collapsed state is centered in the expansion range so chains can
@@ -2432,6 +2822,9 @@ class PygameLobbyScene:
         h = int(round(collapsed_h + (expanded.height - collapsed_h) * t))
         return pygame.Rect(expanded.x, y, expanded.width, h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'right rect expanded' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _right_rect_expanded(self) -> pygame.Rect:
         lb = self._users_rect()
         # Lower and slightly narrower so chains are clearly visible around it.
@@ -2441,25 +2834,43 @@ class PygameLobbyScene:
         h = min(210, max(130, self.h - y - 72))
         return pygame.Rect(x, y, base_w, h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'online header rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _online_header_rect(self) -> pygame.Rect:
         right = self._right_rect()
         return pygame.Rect(right.x + 8, right.y + 8, right.width - 16, 30)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'players row height' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _players_row_height(self) -> int:
         return 38
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'players visible count' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _players_visible_count(self) -> int:
         list_area = self._players_list_area_rect()
         rows_h = max(0, list_area.height)
         return max(1, rows_h // self._players_row_height())
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'players list area rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _players_list_area_rect(self) -> pygame.Rect:
         players = self._right_rect()
         return pygame.Rect(players.x + 10, players.y + 44, players.width - 20, max(0, players.height - 52))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'lobby online users' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _lobby_online_users(self) -> list[str]:
         return list(self.online_users)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'players scrollbar parts' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _players_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
         area = self._players_list_area_rect()
         bar = pygame.Rect(area.right - 16, area.y + 4, 14, max(20, area.height - 8))
@@ -2468,6 +2879,9 @@ class PygameLobbyScene:
         track = pygame.Rect(bar.x, up.bottom + 2, bar.width, max(8, down.y - (up.bottom + 2)))
         return up, down, track
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'players scroll thumb rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _players_scroll_thumb_rect(self) -> pygame.Rect | None:
         total = len(self._lobby_online_users())
         visible = self._players_visible_count()
@@ -2480,6 +2894,9 @@ class PygameLobbyScene:
         thumb_y = track.y + int((track.height - thumb_h) * top_ratio)
         return pygame.Rect(track.x + 3, thumb_y, track.width - 6, thumb_h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set players scroll from thumb y' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_players_scroll_from_thumb_y(self, thumb_y: int, thumb_h: int) -> None:
         _, _, track = self._players_scrollbar_parts()
         travel = max(1, track.height - thumb_h)
@@ -2488,50 +2905,80 @@ class PygameLobbyScene:
         max_scroll = max(0, len(self._lobby_online_users()) - self._players_visible_count())
         self.players_scroll = int(round(ratio * max_scroll))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Updates runtime state for ui animations without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_ui_animations(self) -> None:
         target = 1.0 if self.players_expanded else 0.0
         self.players_expand_t += (target - self.players_expand_t) * self.players_expand_speed
         if abs(target - self.players_expand_t) < 0.002:
             self.players_expand_t = target
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'center top rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _center_top_rect(self) -> pygame.Rect:
         # Center top panel: invitations (swapped with online players)
         logs = self._logs_rect()
         return pygame.Rect(logs.x, logs.y, logs.width, min(340, logs.height - 180))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'invite button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _invite_button_rect(self) -> pygame.Rect:
         players = self._right_rect()
         return pygame.Rect(players.x + 10, players.bottom - 44, players.width - 20, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'quick match rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _quick_match_rect(self) -> pygame.Rect:
         left_panel = self._left_panel_rect()
         w = 244
         return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 154, w, 40)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_button_rect(self) -> pygame.Rect:
         left_panel = self._left_panel_rect()
         w = 244
         return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 106, w, 40)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'quick match cancel rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _quick_match_cancel_rect(self) -> pygame.Rect:
         pop_w, pop_h = 420, 82
         pop = pygame.Rect((self.w - pop_w) // 2, self.h - pop_h - 22, pop_w, pop_h)
         return pygame.Rect(pop.right - 120, pop.centery - 16, 96, 32)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Closes active connections and cleans up related runtime state for this feature.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _disconnect_button_rect(self) -> pygame.Rect:
         # Left panel bottom action area (Quit Game behavior)
         left_panel = self._left_panel_rect()
         w = 244
         return pygame.Rect(left_panel.centerx - (w // 2), left_panel.bottom - 58, w, 40)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls popup rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_popup_rect(self) -> pygame.Rect:
         width = min(640, self.w - 100)
         height = min(440, self.h - 90)
         return pygame.Rect((self.w - width) // 2, (self.h - height) // 2, width, height)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls actions' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_actions(self) -> tuple[tuple[str, str], ...]:
         return (("up", "Up"), ("left", "Left"), ("down", "Down"), ("right", "Right"))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls bind rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_bind_rect(self, action: str) -> pygame.Rect:
         popup = self._controls_popup_rect()
         action_index = {name: idx for idx, (name, _) in enumerate(self._controls_actions())}
@@ -2540,18 +2987,30 @@ class PygameLobbyScene:
         start_y = popup.y + 118
         return pygame.Rect(popup.x + popup.width - 252, start_y + idx * row_h, 190, 40)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls close button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_close_button_rect(self) -> pygame.Rect:
         popup = self._controls_popup_rect()
         return pygame.Rect(popup.right - 144, popup.bottom - 58, 112, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls save button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_save_button_rect(self) -> pygame.Rect:
         popup = self._controls_popup_rect()
         return pygame.Rect(popup.x + 32, popup.bottom - 58, 148, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls reset button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _controls_reset_button_rect(self) -> pygame.Rect:
         popup = self._controls_popup_rect()
         return pygame.Rect(popup.x + 194, popup.bottom - 58, 166, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'controls keycap label' step of the lobby ui / matchmaking system.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _controls_keycap_label(self, key_name: str, waiting: bool) -> str:
         if waiting:
             return "..."
@@ -2577,10 +3036,16 @@ class PygameLobbyScene:
             return pretty.upper()
         return pretty[:3].upper()
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'show controls feedback' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _show_controls_feedback(self, message: str, duration_ms: int = 1800) -> None:
         self.controls_feedback = message
         self.controls_feedback_until_ms = pygame.time.get_ticks() + duration_ms
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set controls binding' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_controls_binding(self, action: str, key_name: str) -> None:
         key_name = normalize_key_name(key_name)
         if not key_name:
@@ -2614,6 +3079,9 @@ class PygameLobbyScene:
         self.controls_bindings[action] = key_name
         self.controls_waiting_action = None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Handles controls mouse and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_controls_mouse(self, pos: tuple[int, int]) -> None:
         popup = self._controls_popup_rect()
         if self.controls_waiting_action is not None:
@@ -2649,14 +3117,23 @@ class PygameLobbyScene:
                 self._show_controls_feedback(f"Listening for {action.title()}...", duration_ms=1300)
                 return
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'invite by name rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _invite_by_name_rect(self) -> pygame.Rect:
         invites = self._center_top_rect()
         return pygame.Rect(invites.x + 12, invites.y + 44, invites.width - 172, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'invite by name send rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _invite_by_name_send_rect(self) -> pygame.Rect:
         invites = self._center_top_rect()
         return pygame.Rect(invites.right - 150, invites.y + 44, 138, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'incoming invites area rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _incoming_invites_area_rect(self) -> pygame.Rect:
         top = self._center_top_rect()
         # Fixed rows:
@@ -2664,6 +3141,9 @@ class PygameLobbyScene:
         area_y = top.y + 188
         return pygame.Rect(top.x + 8, area_y, top.width - 16, max(84, top.bottom - area_y - 10))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'incoming invites scrollbar parts' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _incoming_invites_scrollbar_parts(self) -> tuple[pygame.Rect, pygame.Rect, pygame.Rect]:
         area = self._incoming_invites_area_rect()
         bar = pygame.Rect(area.right - 18, area.y + 4, 14, area.height - 8)
@@ -2672,6 +3152,9 @@ class PygameLobbyScene:
         track = pygame.Rect(bar.x, up.bottom + 2, bar.width, max(8, down.y - (up.bottom + 2)))
         return up, down, track
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'incoming invites scroll thumb rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _incoming_invites_scroll_thumb_rect(self) -> pygame.Rect | None:
         if len(self.pending_invites) <= self._incoming_invites_visible_count():
             return None
@@ -2683,6 +3166,9 @@ class PygameLobbyScene:
         thumb_y = track.y + int((track.height - thumb_h) * top_ratio)
         return pygame.Rect(track.x + 3, thumb_y, track.width - 6, thumb_h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set pending invites scroll from thumb y' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_pending_invites_scroll_from_thumb_y(self, thumb_y: int, thumb_h: int) -> None:
         _, _, track = self._incoming_invites_scrollbar_parts()
         travel = max(1, track.height - thumb_h)
@@ -2691,6 +3177,9 @@ class PygameLobbyScene:
         max_scroll = max(0, len(self.pending_invites) - self._incoming_invites_visible_count())
         self.pending_invites_scroll = int(round(ratio * max_scroll))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'incoming invite card rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _incoming_invite_card_rect(self, index: int) -> pygame.Rect:
         area = self._incoming_invites_area_rect()
         card_h = 66
@@ -2698,6 +3187,9 @@ class PygameLobbyScene:
         reserve_scrollbar = 24 if len(self.pending_invites) > self._incoming_invites_visible_count() else 8
         return pygame.Rect(area.x + 2, area.y + index * (card_h + spacing), area.width - reserve_scrollbar, card_h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'player row rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _player_row_rect(self, visible_index: int) -> pygame.Rect:
         area = self._players_list_area_rect()
         players_y = area.y
@@ -2705,9 +3197,15 @@ class PygameLobbyScene:
         reserve = 22 if len(self._lobby_online_users()) > self._players_visible_count() else 0
         return pygame.Rect(area.x, players_y + visible_index * row_h, area.width - reserve, row_h - 6)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'player eye rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _player_eye_rect(self, row: pygame.Rect) -> pygame.Rect:
         return pygame.Rect(row.right - 24, row.y + 4, 18, 18)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'start spectate' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _start_spectate(self, target_user: str, game_id: str | None = None) -> None:
         if not target_user or target_user.casefold() == self.username.casefold():
             return
@@ -2731,6 +3229,9 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Spectate request failed: {error}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'should block incoming invites' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _should_block_incoming_invites(self, from_user: str | None = None) -> bool:
         if from_user:
             idle_casefold = {u.casefold() for u in self.idle_users}
@@ -2739,6 +3240,9 @@ class PygameLobbyScene:
         quick_label, _, _ = self._quick_action_state()
         return quick_label == "SPECTATE" or self.pending_lobby_spectate_target is not None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Decide whether the primary left-panel action should be QUICK MATCH or SPECTATE.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _quick_action_state(self) -> tuple[str, str | None, str | None]:
         """
         Decide whether the primary left-panel action should be QUICK MATCH or SPECTATE.
@@ -2775,6 +3279,9 @@ class PygameLobbyScene:
 
         return "QUICK MATCH", None, None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'active match id for user' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _active_match_id_for_user(self, username: str) -> str | None:
         username_cf = username.casefold()
         for match in self.active_matches:
@@ -2785,6 +3292,9 @@ class PygameLobbyScene:
                     return game_id
         return None
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'cursor index from x' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _cursor_index_from_x(
         self,
         font: pygame.font.Font,
@@ -2800,6 +3310,9 @@ class PygameLobbyScene:
                 return idx
         return len(text)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'edit text field' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _edit_text_field(
         self,
         *,
@@ -2832,10 +3345,16 @@ class PygameLobbyScene:
             return text, cursor
         return text, cursor
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'outgoing pending strip rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _outgoing_pending_strip_rect(self) -> pygame.Rect:
         invites = self._center_top_rect()
         return pygame.Rect(invites.x + 12, invites.y + 96, invites.width - 24, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'outgoing pending item rects' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _outgoing_pending_item_rects(self) -> list[tuple[str, bool, pygame.Rect, pygame.Rect]]:
         strip = self._outgoing_pending_strip_rect()
         items: list[tuple[str, bool, pygame.Rect, pygame.Rect]] = []
@@ -2860,23 +3379,38 @@ class PygameLobbyScene:
             x += item_w + 8
         return items
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'invite popup rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _invite_popup_rect(self) -> pygame.Rect:
         width = min(560, self.w - 120)
         height = 220
         return pygame.Rect((self.w - width) // 2, (self.h - height) // 2, width, height)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'accept invite button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _accept_invite_button_rect(self) -> pygame.Rect:
         popup = self._invite_popup_rect()
         return pygame.Rect(popup.x + 48, popup.bottom - 72, 190, 44)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'decline invite button rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _decline_invite_button_rect(self) -> pygame.Rect:
         popup = self._invite_popup_rect()
         return pygame.Rect(popup.right - 48 - 190, popup.bottom - 72, 190, 44)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_rect(self) -> pygame.Rect:
         logs = self._logs_rect()
         return pygame.Rect(logs.x + 14, logs.bottom - 46, logs.width - 310, 34)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'chat send rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _chat_send_rect(self) -> pygame.Rect:
         chat = self._chat_rect()
         return pygame.Rect(chat.right + 164, chat.y, 120, chat.height)
@@ -2885,6 +3419,9 @@ class PygameLobbyScene:
     # Skin customization: state helpers, modal geometry, handlers, draw.
     # ------------------------------------------------------------------
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Resend USERNAME with the current skin so the server updates its copy.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _send_skin_update(self) -> None:
         """Resend USERNAME with the current skin so the server updates its copy."""
 
@@ -2902,12 +3439,18 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Skin update failed: {error}")
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'set skin color' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _set_skin_color(self, color_key: str) -> None:
         if color_key not in SKIN_COLORS:
             return
         self.current_skin = dataclass_replace(self.current_skin, color=color_key)
         self._send_skin_update()
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'cycle skin color' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _cycle_skin_color(self, step: int) -> None:
         keys = self.skin_color_keys
         try:
@@ -2916,11 +3459,17 @@ class PygameLobbyScene:
             idx = 0
         self._set_skin_color(keys[(idx + step) % len(keys)])
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'open skin modal' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _open_skin_modal(self) -> None:
         self.pending_skin = dataclass_replace(self.current_skin, pattern="solid")
         self.skin_modal_tab = "color"
         self.skin_modal_open = True
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'close skin modal' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _close_skin_modal(self, commit: bool) -> None:
         if commit:
             self.current_skin = dataclass_replace(self.pending_skin, pattern="solid")
@@ -2928,19 +3477,31 @@ class PygameLobbyScene:
             _save_skin_prefs(self.current_skin)
         self.skin_modal_open = False
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_rect(self) -> pygame.Rect:
         w, h = 620, 460
         return pygame.Rect((self.w - w) // 2, (self.h - h) // 2, w, h)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal tab rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_tab_rect(self, idx: int) -> pygame.Rect:
         modal = self._skin_modal_rect()
         tab_w = (modal.width - 40) // max(1, len(self._skin_modal_tabs()))
         x = modal.x + 20 + idx * tab_w
         return pygame.Rect(x, modal.y + 52, tab_w - 6, 30)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal tabs' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_tabs(self) -> list[str]:
         return ["color", "hat", "tail", "eyes"]
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal active options' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_active_options(self) -> list[str]:
         tab = self.skin_modal_tab
         if tab == "color":
@@ -2953,6 +3514,9 @@ class PygameLobbyScene:
             return list(EYE_STYLES)
         return []
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal option rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_option_rect(self, idx: int) -> pygame.Rect:
         modal = self._skin_modal_rect()
         grid_x = modal.x + 20
@@ -2968,19 +3532,31 @@ class PygameLobbyScene:
         row = idx // cols
         return pygame.Rect(grid_x + col * cell_w, grid_y + row * cell_h, cell_w - 8, cell_h - 8)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal preview rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_preview_rect(self) -> pygame.Rect:
         modal = self._skin_modal_rect()
         x = modal.x + modal.width * 60 // 100 + 8
         return pygame.Rect(x, modal.y + 96, modal.right - x - 20, modal.height - 96 - 60)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal reset rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_reset_rect(self) -> pygame.Rect:
         modal = self._skin_modal_rect()
         return pygame.Rect(modal.x + 20, modal.bottom - 46, 110, 30)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'skin modal close rect' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _skin_modal_close_rect(self) -> pygame.Rect:
         modal = self._skin_modal_rect()
         return pygame.Rect(modal.right - 130, modal.bottom - 46, 110, 30)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Handles skin modal click and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_skin_modal_click(self, pos: tuple[int, int]) -> None:
         modal = self._skin_modal_rect()
         if not modal.collidepoint(pos):
@@ -3003,6 +3579,9 @@ class PygameLobbyScene:
             return
 
     # Skin preview: draws a small S-curve snake with the skin applied.
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Renders skin preview for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_skin_preview(self, surf: pygame.Surface, rect: pygame.Rect, skin: SnakeSkin) -> None:
         # Only re-render the snake when the skin actually changed (perf cache)
         cached_skin, cached_surf = self._preview_cache
@@ -3030,6 +3609,9 @@ class PygameLobbyScene:
         pygame.draw.rect(surf, (12, 20, 32), rect, border_radius=10)
         surf.blit(cached_surf, rect.topleft)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Renders skin modal for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_skin_modal(self, surf: pygame.Surface) -> None:
         overlay = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 160))
@@ -3069,6 +3651,9 @@ class PygameLobbyScene:
         self._draw_button(reset, "RESET", accent=(236, 132, 132))
         self._draw_button(close, "APPLY", accent=(96, 216, 168), glow=True)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Renders skin option thumb for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_skin_option_thumb(self, surf: pygame.Surface, rect: pygame.Rect, key: str) -> None:
         tab = self.skin_modal_tab
         cx, cy = rect.centerx, rect.y + rect.height // 2 - 6
@@ -3091,6 +3676,9 @@ class PygameLobbyScene:
             pygame.draw.circle(surf, body_clr, (cx, cy), 18)
             draw_snake_eyes(surf, cx, cy, 16, 1.0, 0.0, key, body_clr)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Handles mouse and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_mouse(self, pos: tuple[int, int]) -> None:
         if self.skin_modal_open:
             self._handle_skin_modal_click(pos)
@@ -3307,6 +3895,9 @@ class PygameLobbyScene:
                     self.invite_name_cursor = len(self.invite_name_text)
                     self.player_popup_target = selected
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'events' step of the lobby ui / matchmaking system.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _events(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -3420,6 +4011,9 @@ class PygameLobbyScene:
                 elif event.key == pygame.K_d:
                     self._reply_invite(False)
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Renders button for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_button(
         self,
         rect: pygame.Rect,
@@ -3455,6 +4049,9 @@ class PygameLobbyScene:
         txt = self.font_small.render(label, True, text_color)
         self.screen.blit(txt, txt.get_rect(center=rect.center))
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'ranked players' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _ranked_players(self) -> list[tuple[str, int]]:
         ranked = []
         for cf, user in self.online_name_by_cf.items():
@@ -3463,6 +4060,9 @@ class PygameLobbyScene:
         ranked = [(user, wins) for user, wins, _order in ranked]
         return ranked
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Implements the 'build bg cache' step of the lobby ui / matchmaking system.
+    # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
     def _build_bg_cache(self) -> pygame.Surface:
         bg = pygame.Surface((self.w, self.h))
         for y in range(self.h):
@@ -3484,6 +4084,9 @@ class PygameLobbyScene:
         bg.blit(circuit, (0, 0))
         return bg
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Renders draw for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw(self) -> None:
         self.frame += 1
         size = (self.w, self.h)
@@ -3517,6 +4120,9 @@ class PygameLobbyScene:
         players = self._right_rect()
         invites_top = self._center_top_rect()
         left_panel = self._left_panel_rect()
+        # // Feature: Lobby UI / Matchmaking
+        # // Purpose: Implements the 'draw cyber panel' step of the lobby ui / matchmaking system.
+        # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
         def draw_cyber_panel(rect: pygame.Rect, accent: tuple[int, int, int]) -> None:
             pygame.draw.rect(frame, (10, 24, 40, 238), rect, border_radius=14)
             glow = pygame.Surface((rect.width + 20, rect.height + 20), pygame.SRCALPHA)
@@ -3680,6 +4286,9 @@ class PygameLobbyScene:
         invites_title_y = invites_area.y - 44
         invites_panel = pygame.Rect(invites_top.x, invites_top.y, invites_top.width, invites_top.height)
 
+        # // Feature: Lobby UI / Matchmaking
+        # // Purpose: Implements the 'draw neon panel' step of the lobby ui / matchmaking system.
+        # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
         def draw_neon_panel(
             rect: pygame.Rect,
             dim: bool = False,
@@ -3719,6 +4328,9 @@ class PygameLobbyScene:
         chain_hi = (86, 178, 118, 210)
         chain_shadow = (16, 44, 30, 185)
 
+        # // Feature: Lobby UI / Matchmaking
+        # // Purpose: Implements the 'draw serpent chain between' step of the lobby ui / matchmaking system.
+        # // Trigger: Called by the lobby ui / matchmaking flow when this helper is needed.
         def draw_serpent_chain_between(a: tuple[int, int], b: tuple[int, int], bend: float = 0.0) -> None:
             x0, y0 = float(a[0]), float(a[1])
             x1, y1 = float(b[0]), float(b[1])
@@ -4269,6 +4881,9 @@ class PygameLobbyScene:
             self._draw_button(self._controls_close_button_rect(), "CLOSE", accent=(232, 132, 132), glow=True)
         pygame.display.flip()
 
+    # // Feature: Lobby UI / Matchmaking
+    # // Purpose: Coordinates the top-level execution flow for this part of the game.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def run(self) -> tuple[bool, bool, bool, str | None, dict[str, dict[str, str]], bool]:
         while self.running:
             self._events()
@@ -4289,6 +4904,10 @@ class PygameLobbyScene:
         )
 
 
+# Features: PRE_05_DEPLOY_BUTTON + LOB_01_USERNAME_SUBMISSION handoff.
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Run pre-lobby then lobby in one Pygame window with scene switching.
+# // Trigger: Called by the pre-lobby / lobby utilities flow when this helper is needed.
 def run_prelobby_to_lobby(
     *,
     server_ip: str,
@@ -4299,6 +4918,7 @@ def run_prelobby_to_lobby(
 
     seed_name = ""
     seed_error = ""
+    music_enabled = True
     resume_lobby_username: str | None = None
     shared_clock: pygame.time.Clock | None = None
     shared_screen: pygame.Surface | None = None
@@ -4308,8 +4928,10 @@ def run_prelobby_to_lobby(
                 initial_username=seed_name,
                 error_message=seed_error,
                 username_validator=username_validator,
+                initial_music_on=music_enabled,
             )
             username, _skin_idx = app.run(keep_pygame=True)
+            music_enabled = bool(app.music_on)
             if not username:
                 pygame.quit()
                 return
@@ -4331,6 +4953,7 @@ def run_prelobby_to_lobby(
             username=username,
             server_ip=server_ip,
             server_port=server_port,
+            music_enabled=music_enabled,
         )
         back_to_prelobby, quit_app, start_game, opponent, match_skins, start_as_spectator = lobby.run()
         if quit_app:
@@ -4346,7 +4969,6 @@ def run_prelobby_to_lobby(
                 username=username,
                 preferred_opponent=opponent,
                 spectator_mode=start_as_spectator,
-                return_to_tk_lobby=False,
                 keep_window_open_on_return=True,
                 initial_skin=skin_to_dict(lobby.current_skin),
                 initial_match_skins=match_skins,
@@ -4364,6 +4986,9 @@ def run_prelobby_to_lobby(
         return
 
 
+# // Feature: Pre-Lobby / Lobby Utilities
+# // Purpose: Coordinates the top-level execution flow for this part of the game.
+# // Trigger: Called at application startup from the CLI entry flow.
 def main() -> None:
     app = PreLobby()
     username, skin_idx = app.run()

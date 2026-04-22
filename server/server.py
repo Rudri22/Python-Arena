@@ -27,6 +27,9 @@ BACKLOG = 20
 GAME_TICK_SECONDS = 0.12
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Parse CLI arguments for server startup.
+# // Trigger: Called at application startup from the CLI entry flow.
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for server startup."""
 
@@ -50,6 +53,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Fail early if the provided port is outside the valid TCP range.
+# // Trigger: Called before state changes to enforce game and input rules.
 def validate_port(port: int) -> None:
     """Fail early if the provided port is outside the valid TCP range."""
 
@@ -57,6 +63,9 @@ def validate_port(port: int) -> None:
         raise ValueError("Port must be between 1 and 65535.")
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Create, bind, and listen on the server socket.
+# // Trigger: Called by the server bootstrap / runtime flow when this helper is needed.
 def create_server_socket(host: str, port: int) -> socket.socket:
     """Create, bind, and listen on the server socket."""
 
@@ -70,6 +79,9 @@ def create_server_socket(host: str, port: int) -> socket.socket:
     return server_socket
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Start the accept loop and keep the backend process alive.
+# // Trigger: Called by the server bootstrap / runtime flow when this helper is needed.
 def run_server(host: str, port: int) -> None:
     """Start the accept loop and keep the backend process alive."""
 
@@ -111,18 +123,27 @@ def run_server(host: str, port: int) -> None:
             print("\n[SERVER] Shutdown requested. Stopping server...")
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Server-level helper for sending protocol messages safely.
+# // Trigger: Triggered when this system needs to open, close, or send network/audio data.
 def _send_socket_message(sock: socket.socket, message: dict) -> None:
     """Server-level helper for sending protocol messages safely."""
 
     sock.sendall(encode_message_for_socket(message))
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Server-level helper for sending already-encoded payload bytes.
+# // Trigger: Triggered when this system needs to open, close, or send network/audio data.
 def _send_socket_bytes(sock: socket.socket, payload: bytes) -> None:
     """Server-level helper for sending already-encoded payload bytes."""
 
     sock.sendall(payload)
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: Sprint 5 PBI 5.
+# // Trigger: Called continuously by the main loop/thread while the app is running.
 def _run_game_loop(server_state: ServerState) -> None:
     """
     Sprint 5 PBI 5.1 + 5.6 continuous match loop.
@@ -186,6 +207,11 @@ def _run_game_loop(server_state: ServerState) -> None:
                     # match teardown so leaderboard reflects new winner score.
                     broadcast_online_users(server_state)
 
+            # Keep lobby presence tightly synchronized even when no invitation/
+            # connect/disconnect event fired this frame.
+            # This runs once per server tick so online panels stay up-to-date.
+            broadcast_online_users(server_state)
+
             # Trim completed futures to keep the map small over long uptime.
             done_fds = [fd for fd, fut in state_send_futures_by_fileno.items() if fut.done()]
             for fd in done_fds:
@@ -196,6 +222,9 @@ def _run_game_loop(server_state: ServerState) -> None:
         send_executor.shutdown(wait=False, cancel_futures=True)
 
 
+# // Feature: Server Bootstrap / Runtime
+# // Purpose: CLI entry point for running the backend server.
+# // Trigger: Called at application startup from the CLI entry flow.
 def main() -> None:
     """CLI entry point for running the backend server."""
 

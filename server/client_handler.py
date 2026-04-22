@@ -17,6 +17,7 @@ from shared.protocol import (
     build_message,
     make_chat_message,
     make_connect_message,
+    make_emote_message,
     make_error_message,
     make_game_over_message,
     make_game_state_message,
@@ -25,13 +26,33 @@ from shared.protocol import (
 )
 from shared.utils import encode_message_for_socket, split_socket_buffer
 
+# Backend feature map for prelobby/lobby ownership.
+# These IDs mirror the frontend list in `client/prelobby_pygame.py`.
+BACKEND_FEATURES: dict[str, str] = {
+    "PRE_01_MUSIC_TOGGLE": "No backend handling (client-local audio only).",
+    "PRE_02_STATUS_BADGE": "No backend handling (client-local typing/ready state).",
+    "PRE_03_DEPLOY_NAME_INPUT": "Validated on username submission in handle_incoming_message -> MessageType.USERNAME.",
+    "PRE_04_SUGGESTED_NAMES": "No backend handling (client-local suggestion chips).",
+    "PRE_05_DEPLOY_BUTTON": "Indirect: deploy proceeds to lobby where username is submitted to server.",
+    "PRE_06_DEPLOY_TRANSITION": "No backend handling (client-local transition animation).",
+    "LOB_01_USERNAME_SUBMISSION": "handle_incoming_message(USERNAME): uniqueness, skin/chat endpoint capture, lobby broadcast.",
+    "LOB_02_ONLINE_AND_LEADERBOARD_SYNC": "broadcast_online_users + ServerState snapshots (users, idle, matches, wins, chat peers).",
+}
 
+
+# // Feature: Server Message Routing
+# // Purpose: Send one protocol message as newline-delimited JSON bytes.
+# // Trigger: Triggered when this system needs to open, close, or send network/audio data.
 def send_message(client_socket: socket.socket, message: dict) -> None:
     """Send one protocol message as newline-delimited JSON bytes."""
 
     client_socket.sendall(encode_message_for_socket(message))
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (authoritative online/idle/match/wins/chat-peers snapshot).
+# // Feature: Server Message Routing
+# // Purpose: PBI 2.
+# // Trigger: Called by the server message routing flow when this helper is needed.
 def broadcast_online_users(server_state: ServerState) -> None:
     """
     PBI 2.4: broadcast updated online users list to all connected clients.
@@ -59,6 +80,10 @@ def broadcast_online_users(server_state: ServerState) -> None:
             continue
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (waiting-state hint tied to roster size).
+# // Feature: Server Message Routing
+# // Purpose: PBI 2.
+# // Trigger: Triggered when this system needs to open, close, or send network/audio data.
 def _send_waiting_status_if_needed(
     client_socket: socket.socket,
     server_state: ServerState,
@@ -75,6 +100,10 @@ def _send_waiting_status_if_needed(
         send_message(client_socket, waiting_message)
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (match assignment triggers roster refresh).
+# // Feature: Server Message Routing
+# // Purpose: PBI 2.
+# // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
 def _handle_invitation_message(
     client_socket: socket.socket,
     payload: dict,
@@ -110,6 +139,7 @@ def _handle_invitation_message(
             reason_to_error = {
                 "user_offline": "Quick Match failed: user offline.",
                 "user_in_match": "You are already in a match.",
+                "single_session_busy": "A match is already running. Wait for it to finish.",
             }
             send_message(client_socket, make_error_message(reason_to_error.get(reason, "Quick Match failed.")))
             return
@@ -290,6 +320,7 @@ def _handle_invitation_message(
                 "user_offline": "Selected player is offline.",
                 "user_in_match": "Selected player is already in a match.",
                 "user_busy": "Selected player is busy with another invite.",
+                "single_session_busy": "A match is already running. Wait for it to finish.",
             }
             send_message(client_socket, make_error_message(reason_to_error.get(reason, "Invitation failed.")))
             return
@@ -330,6 +361,7 @@ def _handle_invitation_message(
                 "invite_not_found": "No pending invitation found for this action.",
                 "user_in_match": "One of the players is already in a match.",
                 "invalid_action": "Unsupported invitation action.",
+                "single_session_busy": "A match is already running. Wait for it to finish.",
             }
             send_message(client_socket, make_error_message(reason_to_error.get(reason, "Invitation action failed.")))
             return
@@ -424,6 +456,9 @@ def _handle_invitation_message(
     send_message(client_socket, make_error_message("Unsupported invitation action."))
 
 
+# // Feature: Server Message Routing
+# // Purpose: Sprint 3 backend movement integration.
+# // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
 def _handle_movement_message(
     client_socket: socket.socket,
     payload: dict,
@@ -501,6 +536,10 @@ def _handle_movement_message(
     # duplicates here can build client-side backlogs and cause visible lag.
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (lobby/match social signals rely on active roster routing).
+# // Feature: Server Message Routing
+# // Purpose: Sprint 6 PBI 6.
+# // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
 def _handle_chat_message(
     client_socket: socket.socket,
     payload: dict,
@@ -590,6 +629,61 @@ def _handle_chat_message(
     )
 
 
+_VALID_EMOTES: frozenset[str] = frozenset({"heheheha", "grrr", "cry"})
+
+
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (emote routed to current live match participants/spectators).
+# // Feature: Server Message Routing
+# // Purpose: Handles emote message and applies the related game action.
+# // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
+def _handle_emote_message(
+    client_socket: socket.socket,
+    payload: dict,
+    server_state: ServerState,
+    sender_client_id: str,
+) -> None:
+    sender_username = server_state.get_client_username(sender_client_id)
+    if sender_username is None:
+        return
+
+    claimed_sender = str(payload.get("sender", "")).strip()
+    if claimed_sender and claimed_sender.casefold() != sender_username.casefold():
+        return
+
+    emote = str(payload.get("emote", "")).strip()
+    if emote not in _VALID_EMOTES:
+        return
+
+    game_id = str(payload.get("game_id", "")).strip() or None
+    success, _reason, resolved_game_id, _players = server_state.resolve_live_match_for_interaction(
+        sender_username,
+        game_id=game_id,
+    )
+    if not success or resolved_game_id is None:
+        return
+
+    msg = make_emote_message(sender=sender_username, emote=emote, game_id=resolved_game_id)
+    sender_socket = server_state.get_socket_for_username(sender_username)
+    delivered_to_sender = False
+    for sock in server_state.get_match_session_sockets(resolved_game_id):
+        if sender_socket is not None and sock is sender_socket:
+            delivered_to_sender = True
+        try:
+            send_message(sock, msg)
+        except OSError:
+            continue
+    # Keep sender feedback reliable even if participant mapping is temporarily stale.
+    if sender_socket is not None and not delivered_to_sender:
+        try:
+            send_message(sender_socket, msg)
+        except OSError:
+            pass
+
+
+# Features: LOB_01_USERNAME_SUBMISSION, LOB_02_ONLINE_AND_LEADERBOARD_SYNC.
+# // Feature: Server Message Routing
+# // Purpose: Process one incoming message and send server responses.
+# // Trigger: Called by the server message routing flow when this helper is needed.
 def handle_incoming_message(
     client_socket: socket.socket,
     message: dict,
@@ -677,11 +771,23 @@ def handle_incoming_message(
         )
         return
 
+    if message_type == MessageType.EMOTE.value:
+        _handle_emote_message(
+            client_socket=client_socket,
+            payload=payload,
+            server_state=server_state,
+            sender_client_id=client_id,
+        )
+        return
+
     # Default acknowledgement for unhandled message types.
     ack = make_chat_message(sender="SERVER", message=f"Received message type '{message_type}'.")
     send_message(client_socket, ack)
 
 
+# // Feature: Server Message Routing
+# // Purpose: Keep one client connection open until disconnect.
+# // Trigger: Called by the server message routing flow when this helper is needed.
 def handle_client_connection(
     client_socket: socket.socket,
     client_address: tuple[str, int],
