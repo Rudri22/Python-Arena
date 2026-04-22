@@ -15,7 +15,6 @@ import threading
 
 from client.network import ClientConnection
 from client.snake_skins import (
-    derive_skin_colors,
     draw_segmented_snake,
 )
 from client.controls_config import DIRECTION_ACTIONS, load_direction_bindings
@@ -107,6 +106,9 @@ _OPPOSITE_DIRECTION: dict[str, str] = {
 class PygameArenaWindow:
     """Static arena scene with tile grid assets."""
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'init' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def __init__(
         self,
         server_ip: str,
@@ -114,7 +116,6 @@ class PygameArenaWindow:
         username: str,
         preferred_opponent: str | None = None,
         spectator_mode: bool = False,
-        return_to_tk_lobby: bool = True,
         keep_window_open_on_return: bool = False,
         initial_skin: dict | None = None,
         initial_match_skins: dict | None = None,
@@ -132,7 +133,6 @@ class PygameArenaWindow:
         self.username = username
         self.preferred_opponent = preferred_opponent
         self.spectator_mode = spectator_mode
-        self.return_to_tk_lobby = return_to_tk_lobby
         self.keep_window_open_on_return = keep_window_open_on_return
         # Cosmetic skins chosen in the lobby; keyed by player username.
         self.local_skin: SnakeSkin = sanitize_skin(initial_skin) if initial_skin else SnakeSkin()
@@ -186,8 +186,18 @@ class PygameArenaWindow:
         # trail the head along the actual path (no fixed lane or strip).
         _rng_s = random.Random(17)
         _HIST = 300
-
-        def _mk(x: float, y: float, ang: float, spd: float, ln: int, sc: float, ph: float) -> dict:
+        # // Feature: Gameplay Scene
+        # // Purpose: Creates one decorative pool-snake agent with movement tuning and trailing history.
+        # // Trigger: Called during scene initialization to build ambient background snakes.
+        def _make_swim_snake(
+            x: float,
+            y: float,
+            ang: float,
+            spd: float,
+            ln: int,
+            sc: float,
+            ph: float,
+        ) -> dict:
             return {
                 "x": x, "y": y,
                 "angle": ang, "target_angle": ang,
@@ -199,19 +209,19 @@ class PygameArenaWindow:
 
         self.snakes = [
             # Left strip area
-            _mk(45.0,  200.0,  math.pi * 0.5,  62.0, 13, 0.95, 0.0),
-            _mk(68.0,  500.0,  math.pi * 1.5,  55.0, 11, 0.82, 1.5),
-            _mk(30.0,  700.0,  math.pi * 0.35, 48.0,  9, 0.72, 2.7),
+            _make_swim_snake(45.0,  200.0,  math.pi * 0.5,  62.0, 13, 0.95, 0.0),
+            _make_swim_snake(68.0,  500.0,  math.pi * 1.5,  55.0, 11, 0.82, 1.5),
+            _make_swim_snake(30.0,  700.0,  math.pi * 0.35, 48.0,  9, 0.72, 2.7),
             # Right strip area
-            _mk(1175.0, 200.0, math.pi * 0.5,  58.0, 12, 0.90, 0.8),
-            _mk(1155.0, 480.0, math.pi * 1.7,  65.0, 14, 1.00, 1.9),
-            _mk(1185.0, 680.0, math.pi * 1.5,  52.0, 10, 0.78, 3.4),
+            _make_swim_snake(1175.0, 200.0, math.pi * 0.5,  58.0, 12, 0.90, 0.8),
+            _make_swim_snake(1155.0, 480.0, math.pi * 1.7,  65.0, 14, 1.00, 1.9),
+            _make_swim_snake(1185.0, 680.0, math.pi * 1.5,  52.0, 10, 0.78, 3.4),
             # Bottom strip area
-            _mk(300.0,  750.0, 0.05,           70.0, 11, 0.86, 0.3),
-            _mk(850.0,  750.0, math.pi,        60.0, 12, 0.92, 2.4),
+            _make_swim_snake(300.0,  750.0, 0.05,           70.0, 11, 0.86, 0.3),
+            _make_swim_snake(850.0,  750.0, math.pi,        60.0, 12, 0.92, 2.4),
         ]
 
-        del _mk, _rng_s
+        del _make_swim_snake, _rng_s
 
         # Poison drip particles falling from the arch serpent.
         rng = random.Random(42)
@@ -371,6 +381,9 @@ class PygameArenaWindow:
         self._reset_local_round_layout()
         self._connect_to_server()
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Return a copy so per-player skin state never shares object identity.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _clone_skin(self, skin: SnakeSkin) -> SnakeSkin:
         """Return a copy so per-player skin state never shares object identity."""
 
@@ -382,6 +395,9 @@ class PygameArenaWindow:
             eyes=skin.eyes,
         )
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Store one player's skin in exact and casefold maps.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _remember_skin(self, username: str, raw_skin: SnakeSkin | dict | None) -> None:
         """Store one player's skin in exact and casefold maps."""
 
@@ -397,6 +413,9 @@ class PygameArenaWindow:
         self.skin_by_username[name] = parsed
         self.skin_by_username_cf[name.casefold()] = parsed
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Lookup a player's skin using exact-name, then casefold fallback.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _skin_for_player(self, username: str, fallback: SnakeSkin) -> SnakeSkin:
         """Lookup a player's skin using exact-name, then casefold fallback."""
 
@@ -409,15 +428,13 @@ class PygameArenaWindow:
                 return found
         return fallback
 
+    # // Feature: Gameplay Assets
+    # // Purpose: Load DJ deck art used by the arena snake idle scene.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_dj_set_art(self) -> pygame.Surface | None:
-        """Load user-provided DJ deck art used by the arena snake idle scene."""
+        """Load DJ deck art used by the arena snake idle scene."""
 
         candidates = [ARENA_DIR / "dj_set.png"]
-        downloads = Path.home() / "Downloads"
-        if downloads.exists():
-            for found in downloads.glob("*Design_a_stylized_D.png"):
-                candidates.append(found)
-                break
         for path in candidates:
             if not path.exists():
                 continue
@@ -428,6 +445,9 @@ class PygameArenaWindow:
                 continue
         return None
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Remove edge-connected dark backdrop from the DJ set image.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _strip_dj_backdrop(self, src: pygame.Surface) -> pygame.Surface:
         """Remove edge-connected dark backdrop from the DJ set image."""
 
@@ -448,10 +468,15 @@ class PygameArenaWindow:
         luma_cut = 112.0
         seen = bytearray(w * h)
         q: deque[tuple[int, int]] = deque()
-
-        def _idx(x: int, y: int) -> int:
+        # // Feature: Gameplay Scene
+        # // Purpose: Converts 2D pixel coordinates into a flat index for the flood-fill visited buffer.
+        # // Trigger: Called by backdrop-removal helpers during DJ texture cleanup.
+        def _flat_index(x: int, y: int) -> int:
             return y * w + x
 
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'is bg' step of the gameplay scene system.
+        # // Trigger: Called before state changes to enforce game and input rules.
         def _is_bg(x: int, y: int) -> bool:
             c = out.get_at((x, y))
             if c.a <= 8:
@@ -463,8 +488,11 @@ class PygameArenaWindow:
             luma = (0.299 * c.r) + (0.587 * c.g) + (0.114 * c.b)
             return dist <= dist_cut and luma <= luma_cut
 
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'push' step of the gameplay scene system.
+        # // Trigger: Called by the gameplay scene flow when this helper is needed.
         def _push(x: int, y: int) -> None:
-            ii = _idx(x, y)
+            ii = _flat_index(x, y)
             if seen[ii]:
                 return
             if not _is_bg(x, y):
@@ -504,6 +532,9 @@ class PygameArenaWindow:
             return trimmed
         return out
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Render the original arena serpent as a DJ behind the deck art.
+    # // Trigger: Called every frame during the render phase.
     def _draw_dj_serpent_idle(self, ticks: int, state: str, throw_progress: float) -> bool:
         """Render the original arena serpent as a DJ behind the deck art."""
 
@@ -528,6 +559,9 @@ class PygameArenaWindow:
             self._dj_head_variation = self._dj_rng.uniform(-1.2, 1.2)
             self._dj_variation_next_ms = ticks + self._dj_rng.randint(650, 1350)
 
+        # // Feature: Gameplay Rendering
+        # // Purpose: Renders serpent points for the active frame in this system.
+        # // Trigger: Called every frame during the render phase.
         def _draw_serpent_points(points: list[tuple[float, float]], radius_scale: float = 1.0) -> None:
             if len(points) < 2:
                 return
@@ -556,6 +590,9 @@ class PygameArenaWindow:
                     ey = int(py + perp_y * (r + 4))
                     pygame.draw.line(self.screen, (12, 44, 8), (sx, sy), (ex, ey), 2)
 
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'bezier points' step of the gameplay scene system.
+        # // Trigger: Called by the gameplay scene flow when this helper is needed.
         def _bezier_points(
             p0: pygame.Vector2,
             p1: pygame.Vector2,
@@ -724,6 +761,9 @@ class PygameArenaWindow:
             self._throw_blob_spawned = True
         return True
 
+    # // Feature: Gameplay Assets
+    # // Purpose: Load a terrain texture and crop/scale it to one tile.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_terrain_tile_texture(self, filename: str, crop_anchor: str = "center") -> pygame.Surface | None:
         """Load a terrain texture and crop/scale it to one tile."""
 
@@ -759,6 +799,9 @@ class PygameArenaWindow:
         except pygame.error:
             return None
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Turn near-black background pixels transparent so lava shows through.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _make_black_transparent(self, tex: pygame.Surface | None) -> pygame.Surface | None:
         """Turn near-black background pixels transparent so lava shows through."""
         if tex is None:
@@ -778,6 +821,9 @@ class PygameArenaWindow:
                     out.set_at((x, y), (r, g, b, 255))
         return out
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Normalize tile colors so all tiles share a consistent palette.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _normalize_tile_color(self, tex: pygame.Surface | None) -> pygame.Surface | None:
         """Normalize tile colors so all tiles share a consistent palette."""
         if tex is None:
@@ -819,6 +865,9 @@ class PygameArenaWindow:
     # Poison (lava) frame loading
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Recolor lava pixels to toxic green poison palette.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _apply_poison_filter(self, surf: pygame.Surface) -> pygame.Surface:
         """Recolor lava pixels to toxic green poison palette."""
         out = surf.copy().convert_alpha()
@@ -835,6 +884,9 @@ class PygameArenaWindow:
                 out.set_at((px, py), (nr, ng, nb, a))
         return out
 
+    # // Feature: Gameplay Assets
+    # // Purpose: Load, scale, and poison-filter animated lava frames.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_lava_frames(self) -> list[pygame.Surface]:
         """Load, scale, and poison-filter animated lava frames."""
 
@@ -864,6 +916,9 @@ class PygameArenaWindow:
                 continue
         return frames
 
+    # // Feature: Gameplay Assets
+    # // Purpose: Load, scale, and poison-filter animated lava rock frames.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_lava_rock_frames(self) -> list[pygame.Surface]:
         """Load, scale, and poison-filter animated lava rock frames."""
 
@@ -890,6 +945,9 @@ class PygameArenaWindow:
     # Main loop
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Main game loop.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def run(self) -> bool:
         """Main game loop."""
 
@@ -903,15 +961,15 @@ class PygameArenaWindow:
             self._update_runtime_quality()
 
         self._disconnect_from_server()
-        if self.return_to_lobby_requested and self.return_to_tk_lobby:
-            pygame.quit()
-            self._launch_lobby()
-        elif self.return_to_lobby_requested and self.keep_window_open_on_return:
+        if self.return_to_lobby_requested and self.keep_window_open_on_return:
             pass
         else:
             pygame.quit()
         return self.return_to_lobby_requested
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Auto-toggle low-quality rendering when FPS drops on weaker devices.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_runtime_quality(self) -> None:
         """Auto-toggle low-quality rendering when FPS drops on weaker devices."""
 
@@ -938,6 +996,9 @@ class PygameArenaWindow:
             self.low_quality_mode = False
             self.chat_messages.append("[SYSTEM] Performance mode disabled.")
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Build/cache full-screen tiled lava for a specific animation frame.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _get_tiled_lava_layer(self, frame_index: int) -> pygame.Surface:
         """Build/cache full-screen tiled lava for a specific animation frame."""
 
@@ -954,6 +1015,9 @@ class PygameArenaWindow:
         self._tiled_lava_cache[frame_index] = layer
         return layer
 
+    # // Feature: Gameplay Input
+    # // Purpose: Handles events and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_events(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -985,6 +1049,9 @@ class PygameArenaWindow:
                     self._send_emote(EMOTE_KEYS[event.key])
                 self._handle_direction_input(event.key)
 
+    # // Feature: Gameplay Input
+    # // Purpose: Handles mouse click and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_mouse_click(self, pos: tuple[int, int]) -> None:
         if not self.spectator_mode or self.show_result_screen:
             return
@@ -993,6 +1060,9 @@ class PygameArenaWindow:
                 self._send_emote(emote_name)
                 return
 
+    # // Feature: Gameplay Input
+    # // Purpose: Handles chat key and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_chat_key(self, event: pygame.event.Event) -> bool:
         if event.key == pygame.K_RETURN:
             if self.chat_typing:
@@ -1040,6 +1110,9 @@ class PygameArenaWindow:
             return True
         return False
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'submit chat' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _submit_chat(self) -> None:
         text = self.chat_input.strip()
         self.chat_typing = False
@@ -1063,6 +1136,9 @@ class PygameArenaWindow:
     # Tile drawing
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw one seamless tile with soft lighting, depth, and ultra-subtle texture.
+    # // Trigger: Called every frame during the render phase.
     def _draw_tile(
         self,
         x: int,
@@ -1100,6 +1176,9 @@ class PygameArenaWindow:
         else:
             pygame.draw.rect(self.screen, fill, rect)
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Bottom strip removed: grid remains the bottommost visual element.
+    # // Trigger: Called every frame during the render phase.
     def _draw_bottom_tile_faces(self) -> None:
         """Bottom strip removed: grid remains the bottommost visual element."""
         return
@@ -1108,6 +1187,9 @@ class PygameArenaWindow:
     # Poison pool (lava) drawing
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw animated poison pool across arena background; tiles render on top.
+    # // Trigger: Called every frame during the render phase.
     def _draw_lava(self) -> None:
         """Draw animated poison pool across arena background; tiles render on top."""
 
@@ -1117,6 +1199,9 @@ class PygameArenaWindow:
         frame_index = (pygame.time.get_ticks() // 120) % len(self.lava_frames)
         self.screen.blit(self._get_tiled_lava_layer(frame_index), (0, 0))
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw animated poison rocks in lava zones, excluding grid vicinity.
+    # // Trigger: Called every frame during the render phase.
     def _draw_lava_rocks(self) -> None:
         """Draw animated poison rocks in lava zones, excluding grid vicinity."""
 
@@ -1151,6 +1236,9 @@ class PygameArenaWindow:
 
     # ---- throw state machine helpers (big serpent) -------------------
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Advance the big serpent's throw state machine (idle/wind_up/throw/recover).
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_throw_state(self, ticks: int) -> None:
         """Advance the big serpent's throw state machine (idle/wind_up/throw/recover)."""
 
@@ -1177,6 +1265,9 @@ class PygameArenaWindow:
                 self._throw_state_start = ticks
                 self._next_throw_time = ticks + random.randint(4400, 5600)
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Progress 0.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _throw_progress(self, ticks: int) -> float:
         """Progress 0..1 within the current throw state."""
 
@@ -1190,6 +1281,9 @@ class PygameArenaWindow:
             return min(1.0, elapsed / 600.0)
         return 0.0
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Spawn a poison blob projectile thrown from the serpent's head.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _spawn_blob_from_head(self, head_pos: tuple[float, float], head_dir: tuple[float, float]) -> None:
         """Spawn a poison blob projectile thrown from the serpent's head."""
 
@@ -1235,6 +1329,9 @@ class PygameArenaWindow:
 
     # ---- big serpent rendering ---------------------------------------
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Steer the big serpent's head through the gap above the arena each frame.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_serpent_agent(self, dt: float) -> None:
         """Steer the big serpent's head through the gap above the arena each frame."""
 
@@ -1283,6 +1380,9 @@ class PygameArenaWindow:
 
         s["history"].appendleft((s["x"], s["y"]))
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw the giant decorative serpent fully inside the center gap.
+    # // Trigger: Called every frame during the render phase.
     def _draw_arena_serpent(self) -> None:
         """Draw the giant decorative serpent fully inside the center gap.
 
@@ -1520,6 +1620,9 @@ class PygameArenaWindow:
 
     # ---- poison blobs (projectiles) ----------------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Update and render poison blob projectiles (and their splats).
+    # // Trigger: Called every frame during the render phase.
     def _draw_blobs(self) -> None:
         """Update and render poison blob projectiles (and their splats)."""
 
@@ -1604,6 +1707,9 @@ class PygameArenaWindow:
 
         self._poison_blobs = survivors
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw a poison splat that expands and fades on impact.
+    # // Trigger: Called every frame during the render phase.
     def _draw_splat(self, blob: dict, age_ms: int) -> None:
         """Draw a poison splat that expands and fades on impact."""
 
@@ -1621,6 +1727,9 @@ class PygameArenaWindow:
 
     # ---- toxic-spike obstacles ---------------------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw mushrooms/skulls directly at the authoritative game-obstacle positions.
+    # // Trigger: Called every frame during the render phase.
     def _draw_obstacles(self) -> None:
         """Draw mushrooms/skulls directly at the authoritative game-obstacle positions.
 
@@ -1656,6 +1765,9 @@ class PygameArenaWindow:
 
     # ---- mushroom cluster (original bioluminescent design) ---------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw three bioluminescent toxic mushrooms anchored at tile bottom-center.
+    # // Trigger: Called every frame during the render phase.
     def _draw_mushroom_cluster(self, cx: int, cy: int, glow: float, rng: random.Random) -> None:
         """Draw three bioluminescent toxic mushrooms anchored at tile bottom-center."""
 
@@ -1667,6 +1779,9 @@ class PygameArenaWindow:
         for mx, my, sc in configs:
             self._draw_one_mushroom(int(mx), int(my), sc, glow, rng)
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw one toxic mushroom anchored at (mx, my) — a front-facing sprite.
+    # // Trigger: Called every frame during the render phase.
     def _draw_one_mushroom(self, mx: int, my: int, scale: float, glow: float, rng: random.Random) -> None:
         """Draw one toxic mushroom anchored at (mx, my) — a front-facing sprite."""
 
@@ -1716,6 +1831,9 @@ class PygameArenaWindow:
 
     # ---- venom skull (poison-dungeon themed) -----------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw a dungeon skull stained with venom — glowing green eye sockets match the arena.
+    # // Trigger: Called every frame during the render phase.
     def _draw_skull_obstacle(self, cx: int, cy: int, glow: float, rng: random.Random) -> None:
         """Draw a dungeon skull stained with venom — glowing green eye sockets match the arena."""
 
@@ -1771,6 +1889,9 @@ class PygameArenaWindow:
     # Small pool snakes
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Return num_segs positions spaced 'spacing' pixels apart along the path history.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _sample_arc_positions(
         self,
         history: deque,
@@ -1813,6 +1934,9 @@ class PygameArenaWindow:
             pts.append((px, py))
         return pts
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Update and draw pool snakes using full 2-D agent motion.
+    # // Trigger: Called every frame during the render phase.
     def _draw_snakes(self) -> None:
         """Update and draw pool snakes using full 2-D agent motion.
 
@@ -1977,6 +2101,9 @@ class PygameArenaWindow:
     # Grid
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Draw the full arena grid and its lighting passes.
+    # // Trigger: Called every frame during the render phase.
     def _draw_grid(self) -> None:
         """Draw the full arena grid and its lighting passes."""
 
@@ -2080,6 +2207,9 @@ class PygameArenaWindow:
     # Gameplay: networking
     # ==================================================================
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Establishes the connection required for this feature and initializes related runtime state.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _connect_to_server(self) -> None:
         try:
             self.connection = ClientConnection(server_ip=self.server_ip, server_port=self.server_port)
@@ -2098,6 +2228,9 @@ class PygameArenaWindow:
             )
         )
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Closes active connections and cleans up related runtime state for this feature.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _disconnect_from_server(self) -> None:
         if self.connection is not None:
             try:
@@ -2106,6 +2239,9 @@ class PygameArenaWindow:
                 pass
             self.connection = None
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Implements the 'receiver loop' step of the gameplay networking system.
+    # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _receiver_loop(self) -> None:
         while self.running and self.connection is not None:
             try:
@@ -2115,6 +2251,9 @@ class PygameArenaWindow:
                 break
             self.incoming_queue.put(msg)
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Implements the 'drain incoming queue' step of the gameplay networking system.
+    # // Trigger: Triggered by incoming server/peer messages in the networking loop.
     def _drain_incoming_queue(self) -> None:
         latest_game_state: dict | None = None
         while True:
@@ -2134,6 +2273,9 @@ class PygameArenaWindow:
         if latest_game_state is not None:
             self._handle_server_message(latest_game_state)
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Handles server message and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_server_message(self, message: dict) -> None:
         msg_type = message.get("type")
         payload  = message.get("payload", {})
@@ -2276,6 +2418,9 @@ class PygameArenaWindow:
         if msg_type == "socket_error":
             self._mark_connection_issue(str(payload.get("message", "Lost connection.")))
 
+    # // Feature: Gameplay Emotes
+    # // Purpose: Loads and prepares emote assets used by this feature.
+    # // Trigger: Called during initialization when assets or configuration are loaded.
     def _load_emote_assets(self) -> None:
         for name in EMOTE_NAMES:
             img_path = EMOTES_DIR / f"{name}.jpeg"
@@ -2296,6 +2441,9 @@ class PygameArenaWindow:
                 except pygame.error:
                     pass
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Make near-white matte pixels transparent for cleaner emote cutouts.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _strip_near_white_background(self, src: pygame.Surface) -> pygame.Surface:
         """Make near-white matte pixels transparent for cleaner emote cutouts."""
 
@@ -2310,6 +2458,9 @@ class PygameArenaWindow:
                     out.set_at((x, y), (r, g, b, 0))
         return out
 
+    # // Feature: Gameplay Emotes
+    # // Purpose: Scale emote to fit square box while preserving original aspect ratio.
+    # // Trigger: Called by the gameplay emotes flow when this helper is needed.
     def _fit_emote_image(self, src: pygame.Surface, target_size: int) -> pygame.Surface:
         """Scale emote to fit square box while preserving original aspect ratio."""
 
@@ -2324,6 +2475,9 @@ class PygameArenaWindow:
         canvas.blit(fitted, ((target_size - new_w) // 2, (target_size - new_h) // 2))
         return canvas
 
+    # // Feature: Gameplay Emotes
+    # // Purpose: Implements the 'show emote locally' step of the gameplay emotes system.
+    # // Trigger: Called by the gameplay emotes flow when this helper is needed.
     def _show_emote_locally(self, sender: str, emote: str) -> None:
         if emote not in self._emote_images:
             return
@@ -2344,6 +2498,9 @@ class PygameArenaWindow:
             except Exception:
                 pass
 
+    # // Feature: Gameplay Emotes
+    # // Purpose: Sends emote to synchronize this feature across client/server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _send_emote(self, emote_name: str) -> None:
         if self.connection is None or self.active_game_id is None or self.show_result_screen:
             return
@@ -2360,6 +2517,9 @@ class PygameArenaWindow:
         except OSError:
             pass
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'play game sound' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _play_game_sound(self) -> None:
         if self._game_sound_started:
             return
@@ -2377,6 +2537,9 @@ class PygameArenaWindow:
         except Exception as exc:
             print(f"[audio] _play_game_sound failed: {exc}")
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'mark connection issue' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _mark_connection_issue(self, message: str) -> None:
         self.connection_healthy  = False
         self.connection_notice   = message
@@ -2384,6 +2547,9 @@ class PygameArenaWindow:
         self.match_status = "disconnected"
         self._disconnect_from_server()
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'maybe send auto invite' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _maybe_send_auto_invite(self) -> None:
         if self.connection is None or not self.username_confirmed or self.active_game_id is not None:
             return
@@ -2411,6 +2577,9 @@ class PygameArenaWindow:
         self.pending_invite_sent_ms = pygame.time.get_ticks()
         self.last_server_message    = f"Invited {opponent}"
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'maybe request spectate' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _maybe_request_spectate(self) -> None:
         if self.connection is None or not self.username_confirmed or self.active_game_id is not None:
             return
@@ -2448,6 +2617,9 @@ class PygameArenaWindow:
         self.pending_spectate_game_id = game_id
         self.last_server_message    = f"Spectating {target} ({game_id})..."
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'is primary match client' step of the gameplay scene system.
+    # // Trigger: Called before state changes to enforce game and input rules.
     def _is_primary_match_client(self) -> bool:
         if not self.match_players:
             return False
@@ -2455,6 +2627,9 @@ class PygameArenaWindow:
         primary = min((p1, p2), key=str.casefold)
         return self.username.casefold() == primary.casefold()
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Sends blob pie spawn to synchronize this feature across client/server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _send_blob_pie_spawn(self, *, cell_x: int, cell_y: int, kind: str) -> None:
         if self.connection is None or self.active_game_id is None:
             return
@@ -2478,6 +2653,9 @@ class PygameArenaWindow:
     # Gameplay: state sync + interpolation
     # ==================================================================
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Implements the 'sync from game state' step of the gameplay simulation system.
+    # // Trigger: Called by the gameplay simulation flow when this helper is needed.
     def _sync_from_game_state(self, state: dict) -> None:
         old_a = list(self.snake_a)
         old_b = list(self.snake_b)
@@ -2596,10 +2774,19 @@ class PygameArenaWindow:
 
         self._start_state_interpolation(old_a, old_b)
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'start state interpolation' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _start_state_interpolation(self, old_a: list, old_b: list) -> None:
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'to float' step of the gameplay scene system.
+        # // Trigger: Called by the gameplay scene flow when this helper is needed.
         def to_float(cells: list) -> list:
             return [(float(x), float(y)) for x, y in cells]
 
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'should snap' step of the gameplay scene system.
+        # // Trigger: Called by the gameplay scene flow when this helper is needed.
         def _should_snap(old_cells: list, new_cells: list) -> bool:
             if not old_cells or not new_cells:
                 return True
@@ -2644,12 +2831,18 @@ class PygameArenaWindow:
         self.render_snake_a = list(from_a)
         self.render_snake_b = list(from_b)
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Updates runtime state for interpolated snakes without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_interpolated_snakes(self) -> None:
         if not self.interp_to_snake_a and not self.interp_to_snake_b:
             return
         elapsed = pygame.time.get_ticks() - self.state_interp_start_ms
         t = max(0.0, min(1.0, elapsed / STATE_INTERPOLATION_MS)) if STATE_INTERPOLATION_MS > 0 else 1.0
 
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'lerp' step of the gameplay scene system.
+        # // Trigger: Called by the gameplay scene flow when this helper is needed.
         def lerp(start: list, end: list) -> list:
             if len(start) != len(end):
                 return list(end)
@@ -2662,6 +2855,9 @@ class PygameArenaWindow:
     # Gameplay: movement + input
     # ==================================================================
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'build direction key map' step of the gameplay scene system.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _build_direction_key_map(self) -> dict[int, str]:
         mapping: dict[int, str] = {}
         for action in DIRECTION_ACTIONS:
@@ -2674,6 +2870,9 @@ class PygameArenaWindow:
                 continue
         return mapping
 
+    # // Feature: Gameplay Input
+    # // Purpose: Handles direction input and applies the related game action.
+    # // Trigger: Triggered by user input events (keyboard/mouse) or UI interactions.
     def _handle_direction_input(self, key: int) -> None:
         if key in self.direction_key_map:
             requested = self.direction_key_map[key]
@@ -2687,6 +2886,9 @@ class PygameArenaWindow:
             self._send_movement_command(requested)
             self.last_move_ms = pygame.time.get_ticks()
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Updates runtime state for movement without changing external behavior.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _update_movement(self) -> None:
         if self.show_result_screen or not self.connection_healthy:
             return
@@ -2707,6 +2909,9 @@ class PygameArenaWindow:
                 return
         self._send_movement_command(self.snake_a_direction)
 
+    # // Feature: Gameplay Networking
+    # // Purpose: Sends movement command to synchronize this feature across client/server.
+    # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
     def _send_movement_command(self, direction: str) -> None:
         if self.connection is None or not self.username_confirmed or self.active_game_id is None:
             return
@@ -2719,6 +2924,9 @@ class PygameArenaWindow:
     # Gameplay: local physics fallback (used before server state arrives)
     # ==================================================================
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'is out of bounds' step of the gameplay scene system.
+    # // Trigger: Called before state changes to enforce game and input rules.
     def _is_out_of_bounds(self, x: int, y: int) -> bool:
         # Outer walls
         if x < 1 or x >= GAME_BOARD_COLS - 1 or y < 1 or y >= GAME_BOARD_ROWS - 1:
@@ -2729,13 +2937,22 @@ class PygameArenaWindow:
             return True
         return False
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'pushback cell' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _pushback_cell(self, hx: int, hy: int, dx: int, dy: int) -> tuple[int, int]:
         return (hx - dx, hy - dy)
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'reset local round layout' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _reset_local_round_layout(self) -> None:
         self.game_obstacles = list(STATIC_OBSTACLES_GAME)
         self.game_pies = {}
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'adjust snake length' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _adjust_snake_length(self, snake_cells: list, health: int) -> None:
         if health <= 0:
             target = 1
@@ -2746,6 +2963,9 @@ class PygameArenaWindow:
         elif len(snake_cells) < target and snake_cells:
             snake_cells.extend([snake_cells[-1]] * (target - len(snake_cells)))
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Implements the 'step preview snake' step of the gameplay simulation system.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _step_preview_snake(
         self,
         snake_cells: list,
@@ -2792,10 +3012,16 @@ class PygameArenaWindow:
         self._adjust_snake_length(snake_cells, health)
         setattr(self, health_attr, health)
 
+    # // Feature: Gameplay Simulation
+    # // Purpose: Implements the 'step local physics' step of the gameplay simulation system.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def _step_local_physics(self) -> None:
         self._step_preview_snake(self.snake_a, self.snake_a_direction, "snake_a_health", self.snake_b)
         self._step_preview_snake(self.snake_b, self.snake_b_direction, "snake_b_health", self.snake_a)
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'check local game over' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _check_local_game_over(self) -> None:
         if self.snake_a_health > 0 and self.snake_b_health > 0:
             return
@@ -2817,12 +3043,18 @@ class PygameArenaWindow:
     # Gameplay: rendering
     # ==================================================================
 
+    # // Feature: Gameplay Scene
+    # // Purpose: Implements the 'game to pixel' step of the gameplay scene system.
+    # // Trigger: Called by the gameplay scene flow when this helper is needed.
     def _game_to_pixel(self, col: float, row: float) -> tuple[float, float]:
         return (
             self.game_origin_x + col * GAME_CELL_W + GAME_CELL_W * 0.5,
             self.game_origin_y + row * GAME_CELL_H + GAME_CELL_H * 0.5,
         )
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Renders game snakes for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_game_snakes(self) -> None:
         if self.has_authoritative_state:
             self._update_interpolated_snakes()
@@ -2834,6 +3066,9 @@ class PygameArenaWindow:
             self._draw_single_game_snake(fa, self.snake_a_skin)
             self._draw_single_game_snake(fb, self.snake_b_skin)
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Renders single game snake for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_single_game_snake(self, cells: list, skin: SnakeSkin) -> None:
         if not cells:
             return
@@ -2841,6 +3076,9 @@ class PygameArenaWindow:
         centers = [self._game_to_pixel(x, y) for x, y in cells]
         draw_segmented_snake(self.screen, centers, skin, r)
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Renders game pies for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_game_pies(self) -> None:
         ticks = pygame.time.get_ticks()
         minimal = self.low_quality_mode
@@ -2876,6 +3114,9 @@ class PygameArenaWindow:
             if kind in {"yellow", "red"}:
                 pygame.draw.circle(self.screen, (252, 252, 252), (cx, cy), r + 2, 1)
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Render a centred 3-2-1 / GO!
+    # // Trigger: Called every frame during the render phase.
     def _draw_countdown_overlay(self) -> None:
         """Render a centred 3-2-1 / GO! overlay while the game is frozen."""
         if self.countdown_ticks <= 0:
@@ -2926,6 +3167,9 @@ class PygameArenaWindow:
         sub = self.font_hud_sm.render("GET READY!", True, (220, 220, 220))
         self.screen.blit(sub, sub.get_rect(center=(cx, cy + int(font_size * 0.62))))
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Minimal HUD: slim top bar + optional chat overlay.
+    # // Trigger: Called every frame during the render phase.
     def _draw_hud(self) -> None:
         """Minimal HUD: slim top bar + optional chat overlay."""
 
@@ -3007,6 +3251,9 @@ class PygameArenaWindow:
                 self.screen.blit(ls, (self.arena_x + 14, cy_chat + 4 + i * 18))
         self._draw_spectator_emote_buttons()
 
+    # // Feature: Gameplay Emotes
+    # // Purpose: Implements the 'spectator emote button rects' step of the gameplay emotes system.
+    # // Trigger: Called by the gameplay emotes flow when this helper is needed.
     def _spectator_emote_button_rects(self) -> list[tuple[str, pygame.Rect]]:
         count = len(EMOTE_NAMES)
         total_w = count * SPECTATOR_EMOTE_BUTTON_SIZE + max(0, count - 1) * SPECTATOR_EMOTE_BUTTON_GAP
@@ -3025,6 +3272,9 @@ class PygameArenaWindow:
             for idx, name in enumerate(EMOTE_NAMES)
         ]
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Renders spectator emote buttons for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_spectator_emote_buttons(self) -> None:
         if not self.spectator_mode or self.show_result_screen:
             return
@@ -3053,6 +3303,9 @@ class PygameArenaWindow:
                 lbl = self.font_hud_sm.render(key_label, True, (220, 230, 240))
                 self.screen.blit(lbl, (rect.x + 3, rect.y + 2))
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Renders emotes for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_emotes(self) -> None:
         now = pygame.time.get_ticks()
         pad = 8
@@ -3086,6 +3339,9 @@ class PygameArenaWindow:
             icon.set_alpha(alpha)
             self.screen.blit(icon, (x, y))
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Renders result screen for the active frame in this system.
+    # // Trigger: Called every frame during the render phase.
     def _draw_result_screen(self) -> None:
         ticks = pygame.time.get_ticks()
 
@@ -3142,6 +3398,9 @@ class PygameArenaWindow:
         else:
             a_name, b_name = self.player_a_name, self.player_b_name
 
+        # // Feature: Gameplay Scene
+        # // Purpose: Implements the 'score for' step of the gameplay scene system.
+        # // Trigger: Called by the gameplay scene flow when this helper is needed.
         def _score_for(name: str, fallback: int) -> int:
             if name in self.result_scores:
                 return int(self.result_scores[name])
@@ -3186,23 +3445,13 @@ class PygameArenaWindow:
         hint = self.font_hud_sm.render("R  return to lobby     ESC  quit", True, HUD_DIM)
         self.screen.blit(hint, (mid - hint.get_width() // 2, card.bottom - 34))
 
-    def _launch_lobby(self) -> None:
-        try:
-            from client.gui import ArenaGuiApp
-            app = ArenaGuiApp()
-            app.server_ip_var.set(self.server_ip)
-            app.server_port_var.set(str(self.server_port))
-            app.username_var.set(self.username)
-            app._retry_same_username = True
-            app.root.after(450, app._connect)
-            app.run()
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------
     # Frame composition
     # ------------------------------------------------------------------
 
+    # // Feature: Gameplay Rendering
+    # // Purpose: Render complete arena scene plus live gameplay entities.
+    # // Trigger: Called every frame during the render phase.
     def _draw_frame(self) -> None:
         """Render complete arena scene plus live gameplay entities."""
 
@@ -3233,13 +3482,15 @@ class PygameArenaWindow:
             self._draw_result_screen()
 
 
+# // Feature: Gameplay Scene
+# // Purpose: Entrypoint kept compatible with existing callers.
+# // Trigger: Called at application startup from the CLI entry flow.
 def main(
     server_ip: str = "127.0.0.1",
     server_port: int = 5000,
     username: str = "Player",
     preferred_opponent: str | None = None,
     spectator_mode: bool = False,
-    return_to_tk_lobby: bool = True,
     keep_window_open_on_return: bool = False,
     initial_skin: dict | None = None,
     initial_match_skins: dict | None = None,
@@ -3252,7 +3503,6 @@ def main(
         username=username,
         preferred_opponent=preferred_opponent,
         spectator_mode=spectator_mode,
-        return_to_tk_lobby=return_to_tk_lobby,
         keep_window_open_on_return=keep_window_open_on_return,
         initial_skin=initial_skin,
         initial_match_skins=initial_match_skins,

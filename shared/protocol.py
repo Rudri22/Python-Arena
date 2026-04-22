@@ -144,6 +144,9 @@ TAILS: tuple[str, ...] = ("none", "rattle", "spike", "flame", "fin", "club", "le
 EYE_STYLES: tuple[str, ...] = ("normal", "fierce", "glow", "visor", "sleepy", "star", "cyber")
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Coerce a raw dict into a valid SnakeSkin, falling back to defaults.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def sanitize_skin(raw: dict | None) -> SnakeSkin:
     """Coerce a raw dict into a valid SnakeSkin, falling back to defaults."""
 
@@ -166,12 +169,18 @@ def sanitize_skin(raw: dict | None) -> SnakeSkin:
     )
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Convert a SnakeSkin to a plain JSON-ready dict.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def skin_to_dict(skin: SnakeSkin) -> dict[str, str]:
     """Convert a SnakeSkin to a plain JSON-ready dict."""
 
     return asdict(skin)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Parse a dict (possibly from the wire) into a validated SnakeSkin.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def skin_from_dict(data: dict | None) -> SnakeSkin:
     """Parse a dict (possibly from the wire) into a validated SnakeSkin."""
 
@@ -213,6 +222,9 @@ REQUIRED_FIELDS: dict[MessageType, set[str]] = {
 }
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Build a protocol message using the shared shape used across the project.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def build_message(message_type: MessageType | str, **payload: Any) -> dict[str, Any]:
     """
     Build a protocol message using the shared shape used across the project.
@@ -230,6 +242,9 @@ def build_message(message_type: MessageType | str, **payload: Any) -> dict[str, 
     return message
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Validate one decoded message dictionary.
+# // Trigger: Called before state changes to enforce game and input rules.
 def validate_message(message: dict[str, Any]) -> dict[str, Any]:
     """
     Validate one decoded message dictionary.
@@ -265,6 +280,9 @@ def validate_message(message: dict[str, Any]) -> dict[str, Any]:
     return message
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Convert a validated message to JSON text.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def serialize_message(message: dict[str, Any]) -> str:
     """
     Convert a validated message to JSON text.
@@ -277,6 +295,9 @@ def serialize_message(message: dict[str, Any]) -> str:
     return json.dumps(message, separators=(",", ":"), ensure_ascii=False)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Parse raw JSON text received from the network into a validated message.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def parse_message(raw_message: str) -> dict[str, Any]:
     """
     Parse raw JSON text received from the network into a validated message.
@@ -295,6 +316,9 @@ def parse_message(raw_message: str) -> dict[str, Any]:
 # can call small descriptive functions from this shared file.
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Convert a position to plain dictionary form for JSON transport.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def position_to_dict(position: Position | dict[str, int]) -> dict[str, int]:
     """
     Convert a position to plain dictionary form for JSON transport.
@@ -308,6 +332,9 @@ def position_to_dict(position: Position | dict[str, int]) -> dict[str, int]:
     return position
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Convert a typed `GameState` object into a JSON-ready dictionary.
+# // Trigger: Called by the protocol serialization flow when this helper is needed.
 def state_to_dict(state: GameState) -> dict[str, Any]:
     """
     Convert a typed `GameState` object into a JSON-ready dictionary.
@@ -320,12 +347,18 @@ def state_to_dict(state: GameState) -> dict[str, Any]:
     return asdict(state)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Create one board position.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_position(x: int, y: int) -> Position:
     """Create one board position."""
 
     return Position(x=x, y=y)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Create one snake entry for the shared game state.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_snake_state(
     player: str,
     body: list[Position],
@@ -344,12 +377,18 @@ def make_snake_state(
     )
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Create one pie entry for the shared game state.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_pie_state(pie_id: str, position: Position, points: int = 1) -> PieState:
     """Create one pie entry for the shared game state."""
 
     return PieState(pie_id=pie_id, position=position, points=points)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Create one obstacle entry for the shared game state.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_obstacle_state(
     obstacle_id: str,
     position: Position,
@@ -360,6 +399,9 @@ def make_obstacle_state(
     return ObstacleState(obstacle_id=obstacle_id, position=position, kind=kind)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Create the timer block used inside the game state.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_timer_state(
     total_seconds: int,
     remaining_seconds: int,
@@ -374,6 +416,9 @@ def make_timer_state(
     )
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Build the full game state object used by the server and protocol.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_game_state(
     game_id: str,
     snakes: list[SnakeState],
@@ -401,6 +446,9 @@ def make_game_state(
     )
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Sent when a client first connects to the server.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_connect_message(
     client_id: str,
     client_version: str = "1.0",
@@ -414,6 +462,9 @@ def make_connect_message(
     )
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Sent by the client after connection so the server can register a name.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_username_message(
     username: str,
     skin: dict[str, str] | SnakeSkin | None = None,
@@ -432,12 +483,18 @@ def make_username_message(
     return build_message(MessageType.USERNAME, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Broadcast by the server whenever the lobby user list changes.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_online_users_message(users: list[str]) -> dict[str, Any]:
     """Broadcast by the server whenever the lobby user list changes."""
 
     return build_message(MessageType.ONLINE_USERS, users=users)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Notify one user that they are currently in lobby waiting state.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_waiting_message(
     username: str,
     reason: str = "no_opponent_available",
@@ -459,6 +516,9 @@ def make_waiting_message(
     )
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Invitation messages cover invite lifecycle events.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_invitation_message(
     from_user: str,
     to_user: str,
@@ -489,6 +549,9 @@ def make_invitation_message(
     return build_message(MessageType.INVITATION, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Build standardized invitation lifecycle responses for Sprint 2 lobby flow.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_invitation_status_message(
     from_user: str,
     to_user: str,
@@ -522,6 +585,9 @@ def make_invitation_status_message(
     return build_message(MessageType.INVITATION, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Build a match-start notification once an invitation is accepted.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_match_start_message(
     game_id: str,
     players: list[str],
@@ -550,6 +616,9 @@ def make_match_start_message(
     return build_message(MessageType.INVITATION, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Sent during gameplay when a player moves.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_movement_message(
     player: str,
     direction: str,
@@ -570,6 +639,9 @@ def make_movement_message(
     return build_message(MessageType.MOVEMENT, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Sent by the server to share the latest authoritative game state.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_game_state_message(
     game_id: str,
     state: dict[str, Any] | GameState,
@@ -585,6 +657,9 @@ def make_game_state_message(
     return build_message(MessageType.GAME_STATE, game_id=game_id, state=serialized_state)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Sent once the match ends so both clients can show the result screen.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_game_over_message(
     game_id: str,
     winner: str,
@@ -602,6 +677,9 @@ def make_game_over_message(
     return build_message(MessageType.GAME_OVER, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Chat can support lobby-wide messages or direct messages.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_chat_message(
     sender: str,
     message: str,
@@ -620,6 +698,9 @@ def make_chat_message(
     return build_message(MessageType.CHAT, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Utility helper for reporting protocol or server-side problems.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_error_message(message: str, details: str | None = None) -> dict[str, Any]:
     """Utility helper for reporting protocol or server-side problems."""
 
@@ -630,6 +711,9 @@ def make_error_message(message: str, details: str | None = None) -> dict[str, An
     return build_message(MessageType.ERROR, **payload)
 
 
+# // Feature: Protocol Serialization
+# // Purpose: Sent by a player to broadcast an in-game emote to both players and spectators.
+# // Trigger: Called when constructing protocol payloads or runtime data structures.
 def make_emote_message(
     sender: str,
     emote: str,

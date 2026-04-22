@@ -12,6 +12,9 @@ from typing import Any
 from shared.protocol import parse_message, serialize_message
 
 
+# // Feature: Socket Framing Utilities
+# // Purpose: Encode one protocol message as newline-delimited JSON bytes.
+# // Trigger: Called by the socket framing utilities flow when this helper is needed.
 def encode_message_for_socket(message: dict[str, Any]) -> bytes:
     """
     Encode one protocol message as newline-delimited JSON bytes.
@@ -23,6 +26,9 @@ def encode_message_for_socket(message: dict[str, Any]) -> bytes:
     return f"{serialize_message(message)}\n".encode("utf-8")
 
 
+# // Feature: Socket Framing Utilities
+# // Purpose: Extract all complete messages from a text buffer.
+# // Trigger: Called by the socket framing utilities flow when this helper is needed.
 def split_socket_buffer(buffer: str) -> tuple[list[dict[str, Any]], str]:
     """
     Extract all complete messages from a text buffer.

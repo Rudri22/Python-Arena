@@ -16,11 +16,6 @@ from typing import Any
 from uuid import uuid4
 
 from server.game_engine import (
-    BOARD_HEIGHT,
-    BOARD_WIDTH,
-    GAP_COL_END,
-    GAP_COL_START,
-    GAP_ROW_END,
     MatchRuntime,
     create_match_runtime,
     queue_direction,
@@ -30,6 +25,9 @@ from server.game_engine import (
 from shared.protocol import SnakeSkin, sanitize_skin, skin_to_dict
 
 
+# // Feature: Server State / Matchmaking
+# // Purpose: Normalize username for case-insensitive identity checks.
+# // Trigger: Called by the server state / matchmaking flow when this helper is needed.
 def _normalize_username(username: str) -> str:
     """Normalize username for case-insensitive identity checks."""
 
@@ -87,6 +85,9 @@ class ServerState:
 
     _lock: Lock = field(default_factory=Lock)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Register a new client connection and return generated client id.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def register_client(self, client_socket: socket.socket | None = None) -> str:
         """Register a new client connection and return generated client id."""
 
@@ -98,6 +99,9 @@ class ServerState:
             self._client_sockets[client_id] = client_socket
             return client_id
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Remove disconnected client and clean all linked lobby/match state.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def unregister_client(self, client_id: str) -> list[str]:
         """Remove disconnected client and clean all linked lobby/match state."""
 
@@ -120,6 +124,9 @@ class ServerState:
 
             return sorted(self._username_to_client.keys())
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 5 PBI 5.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def unregister_client_with_events(self, client_id: str) -> list[dict[str, Any]]:
         """
         Sprint 5 PBI 5.4 + 5.5: unregister and return disconnect-driven events.
@@ -180,6 +187,9 @@ class ServerState:
             self._cleanup_user_lobby_state(previous_username)
             return events
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Assign username if unique; returns status tuple (accepted/reason).
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def set_client_username(self, client_id: str, username: str) -> tuple[bool, str]:
         """Assign username if unique; returns status tuple (accepted/reason)."""
 
@@ -227,12 +237,18 @@ class ServerState:
             self._next_user_session_version += 1
             return True, "accepted"
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Resolve currently assigned username for one client id.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_client_username(self, client_id: str) -> str | None:
         """Resolve currently assigned username for one client id."""
 
         with self._lock:
             return self._client_usernames.get(client_id)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Store a sanitized skin for one connected client.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def set_client_skin(self, client_id: str, raw_skin: dict | None) -> None:
         """Store a sanitized skin for one connected client."""
 
@@ -244,6 +260,9 @@ class ServerState:
                 if username is not None:
                     self._skins_by_username[_normalize_username(username)] = skin
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Store a peer-chat endpoint advertised by one connected client.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def set_client_chat_endpoint(self, client_id: str, host: str | None, port: int | None) -> None:
         """Store a peer-chat endpoint advertised by one connected client."""
 
@@ -266,12 +285,18 @@ class ServerState:
             if username is not None:
                 self._chat_endpoint_by_username[_normalize_username(username)] = endpoint
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return the skin dict for a username, or a default skin if unset.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_skin_dict_for_username(self, username: str) -> dict[str, str]:
         """Return the skin dict for a username, or a default skin if unset."""
 
         with self._lock:
             return self._skin_dict_for_username_locked(username)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Lock-free variant for callers that already hold `_lock`.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _skin_dict_for_username_locked(self, username: str) -> dict[str, str]:
         """Lock-free variant for callers that already hold `_lock`."""
 
@@ -281,6 +306,9 @@ class ServerState:
             skin = self._skins_by_username.get(_normalize_username(username))
         return skin_to_dict(skin if skin is not None else SnakeSkin())
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return online usernames, keeping active-match players visible.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _online_usernames_locked(self) -> list[str]:
         """Return online usernames, keeping active-match players visible."""
 
@@ -294,6 +322,9 @@ class ServerState:
                 names_by_cf.setdefault(username.casefold(), username)
         return sorted(names_by_cf.values(), key=str.casefold)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Build authoritative skin map for both players in one active match.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _match_skins_locked(self, players: tuple[str, str]) -> dict[str, dict[str, str]]:
         """Build authoritative skin map for both players in one active match."""
 
@@ -303,6 +334,9 @@ class ServerState:
             p2: self._skin_dict_for_username_locked(p2),
         }
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Attach authoritative skins as both top-level map and per-snake field.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _attach_skins_to_state_locked(
         self,
         state_payload: dict[str, Any],
@@ -324,12 +358,18 @@ class ServerState:
                         snake["skin"] = dict(skin)
         return state_payload
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return all online usernames sorted for deterministic payloads.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_online_users(self) -> list[str]:
         """Return all online usernames sorted for deterministic payloads."""
 
         with self._lock:
             return self._online_usernames_locked()
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return online usernames mapped to their current session version.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_online_user_sessions(self) -> dict[str, int]:
         """Return online usernames mapped to their current session version."""
 
@@ -339,6 +379,9 @@ class ServerState:
                 result[username] = self._user_session_versions.get(username, 0)
             return result
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return online usernames mapped to authoritative win totals.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_online_user_wins(self) -> dict[str, int]:
         """Return online usernames mapped to authoritative win totals."""
 
@@ -348,6 +391,9 @@ class ServerState:
                 result[username] = int(self._wins_by_user.get(_normalize_username(username), 0))
             return result
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return P2P chat listener endpoints for currently online usernames.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_chat_peers_snapshot(self) -> dict[str, dict[str, str | int]]:
         """Return P2P chat listener endpoints for currently online usernames."""
 
@@ -365,6 +411,9 @@ class ServerState:
                 peers[username] = {"host": host, "port": int(port)}
             return peers
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return active match ids with current player pairs for lobby routing.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_active_matches_snapshot(self) -> list[dict[str, Any]]:
         """Return active match ids with current player pairs for lobby routing."""
 
@@ -382,6 +431,9 @@ class ServerState:
                 )
             return snapshot
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Increment one player's win total when username resolves online identity.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def record_win(self, username: str) -> bool:
         """Increment one player's win total when username resolves online identity."""
 
@@ -393,12 +445,18 @@ class ServerState:
             self._wins_by_user[canonical_cf] = int(self._wins_by_user.get(canonical_cf, 0)) + 1
             return True
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return currently connected sockets for broadcast operations.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_client_sockets(self) -> list[socket.socket]:
         """Return currently connected sockets for broadcast operations."""
 
         with self._lock:
             return [sock for sock in self._client_sockets.values() if sock is not None]
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Find active socket for a given online username, if any.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_socket_for_username(self, username: str) -> socket.socket | None:
         """Find active socket for a given online username, if any."""
 
@@ -408,12 +466,26 @@ class ServerState:
                 return None
             return self._client_sockets.get(client_id)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: True when fewer than two online users are available in lobby.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def has_waiting_player(self) -> bool:
         """True when fewer than two online users are available in lobby."""
 
         with self._lock:
             return len(self._username_to_client) < 2
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Enforce one active match globally for basic-project compliance.
+    # // Trigger: Called before state changes to enforce game and input rules.
+    def _single_match_busy_locked(self) -> bool:
+        """Enforce one active match globally for basic-project compliance."""
+
+        return len(self._active_matches) > 0
+
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Create pending invitation if both users are eligible.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def create_invitation(self, from_user: str, to_user: str) -> tuple[bool, str]:
         """Create pending invitation if both users are eligible."""
 
@@ -424,6 +496,8 @@ class ServerState:
                 return False, "user_offline"
             if from_user == to_user:
                 return False, "cannot_invite_self"
+            if self._single_match_busy_locked():
+                return False, "single_session_busy"
             if from_user in self._user_to_match or to_user in self._user_to_match:
                 return False, "user_in_match"
             # If inviter moves to direct invites, remove from quick queue.
@@ -434,6 +508,9 @@ class ServerState:
             self._pending_invites[invite_key] = "pending"
             return True, "pending"
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Queue one user for quick match, or pair immediately when possible.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def request_quick_match(self, username: str) -> tuple[bool, str, str | None, str | None]:
         """
         Queue one user for quick match, or pair immediately when possible.
@@ -448,6 +525,8 @@ class ServerState:
             player = self._resolve_username(username)
             if player is None:
                 return False, "user_offline", None, None
+            if self._single_match_busy_locked():
+                return False, "single_session_busy", None, None
             if player in self._user_to_match:
                 return False, "user_in_match", None, None
 
@@ -499,6 +578,9 @@ class ServerState:
             )
             return True, "matched", opponent, game_id
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Remove one user from quick-match queue.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def cancel_quick_match(self, username: str) -> tuple[bool, str]:
         """Remove one user from quick-match queue."""
 
@@ -511,6 +593,9 @@ class ServerState:
             self._remove_from_quick_queue_locked(player)
             return True, "cancelled"
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Record that a player has connected via the game window socket.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def mark_player_in_game_window(self, username: str) -> None:
         """Record that a player has connected via the game window socket.
 
@@ -534,6 +619,9 @@ class ServerState:
                 # see the complete 3-2-1 sequence from the same starting point.
                 runtime.countdown_ticks = 25
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Mark an active match for short reconnect handoff (GUI -> Pygame).
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def mark_match_handoff(self, username: str, ttl_seconds: float = 8.0) -> tuple[bool, str]:
         """Mark an active match for short reconnect handoff (GUI -> Pygame)."""
 
@@ -549,6 +637,9 @@ class ServerState:
             self._match_handoff_until[game_id] = time.monotonic() + max(1.0, ttl_seconds)
             return True, "handoff_marked"
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Resolve invitation lifecycle action.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def respond_to_invitation(self, from_user: str, to_user: str, action: str) -> tuple[bool, str, str | None]:
         """
         Resolve invitation lifecycle action.
@@ -574,6 +665,8 @@ class ServerState:
                 return True, "declined", None
 
             if action == "accept":
+                if self._single_match_busy_locked():
+                    return False, "single_session_busy", None
                 if from_user in self._user_to_match or to_user in self._user_to_match:
                     return False, "user_in_match", None
 
@@ -600,6 +693,9 @@ class ServerState:
 
             return False, "invalid_action", None
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 6 PBI 6.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def add_spectator(
         self,
         username: str,
@@ -651,6 +747,9 @@ class ServerState:
             self._user_to_spectated_match[spectator] = resolved_game_id
             return True, "spectating", resolved_game_id, players
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Detach one spectator session from any currently spectated match.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def remove_spectator(self, username: str) -> tuple[bool, str]:
         """Detach one spectator session from any currently spectated match."""
 
@@ -663,6 +762,9 @@ class ServerState:
                 return False, "not_spectating"
             return True, "removed"
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 6 PBI 6.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def resolve_live_match_for_interaction(
         self,
         username: str,
@@ -709,12 +811,18 @@ class ServerState:
 
             return True, "ok", resolved_game_id, players
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return both usernames assigned to one game id.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_match_players(self, game_id: str) -> tuple[str, str] | None:
         """Return both usernames assigned to one game id."""
 
         with self._lock:
             return self._active_matches.get(game_id)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Return packaged game_state dictionary for one active match.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_match_state_dict(self, game_id: str) -> dict[str, Any] | None:
         """Return packaged game_state dictionary for one active match."""
 
@@ -728,6 +836,9 @@ class ServerState:
                 state = self._attach_skins_to_state_locked(state, players)
             return state
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Process one movement command and optionally advance the match tick.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def process_player_movement(
         self,
         player: str,
@@ -771,6 +882,9 @@ class ServerState:
             # server game loop. Movement handling only needs to enqueue input.
             return True, "updated", game_id, None, None
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 5 PBI 5.
+    # // Trigger: Called by the simulation/game loop to advance runtime state.
     def step_active_matches(self) -> list[dict[str, Any]]:
         """
         Sprint 5 PBI 5.1 + 5.6: advance all active matches and collect updates.
@@ -856,6 +970,9 @@ class ServerState:
 
             return updates
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 4 PBI 4.
+    # // Trigger: Called before state changes to enforce game and input rules.
     def validate_movement_command(self, player: str, direction: str) -> tuple[bool, str, str | None]:
         """
         Sprint 4 PBI 4.11: validate movement command before simulation update.
@@ -892,6 +1009,9 @@ class ServerState:
 
             return True, "ok", game_id
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 4 PBI 4.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_match_player_sockets(self, game_id: str) -> list[socket.socket]:
         """
         Sprint 4 PBI 4.12 helper: resolve active-player sockets for one match.
@@ -915,6 +1035,9 @@ class ServerState:
                     sockets.append(sock)
             return sockets
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 6 PBI 6.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_match_session_sockets(self, game_id: str) -> list[socket.socket]:
         """
         Sprint 6 PBI 6.2 helper: resolve sockets for players + spectators.
@@ -941,6 +1064,9 @@ class ServerState:
                     sockets.append(sock)
             return sockets
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Ignore client pie-spawn events; server simulation owns pie generation.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def spawn_blob_pie(
         self,
         *,
@@ -951,71 +1077,19 @@ class ServerState:
         kind: str,
     ) -> tuple[bool, str]:
         """
-        Spawn one serpent-blob pie from a client landing event.
+        Ignore legacy client pie-spawn event.
 
-        The server validates ownership, match, cell bounds, and occupancy so
-        clients remain synchronized and safe from stale/local-only state.
+        Basic-project server rules require the backend simulation to generate
+        pies authoritatively. Client `spawn_pie` actions are accepted as
+        backward-compatible no-ops.
         """
 
-        with self._lock:
-            canonical_actor = self._resolve_username(actor)
-            if canonical_actor is None:
-                return False, "user_offline"
+        _ = (actor, game_id, x, y, kind)
+        return False, "server_authoritative_spawn"
 
-            actor_game_id = self._user_to_match.get(canonical_actor)
-            if actor_game_id is None:
-                return False, "user_not_in_match"
-            if game_id is not None and game_id != actor_game_id:
-                return False, "game_mismatch"
-
-            runtime = self._match_runtimes.get(actor_game_id)
-            if runtime is None or runtime.status != "running":
-                return False, "match_not_running"
-
-            if x < 1 or y < 1 or x >= BOARD_WIDTH - 1 or y >= BOARD_HEIGHT - 1:
-                return False, "out_of_bounds"
-            if GAP_COL_START <= x < GAP_COL_END and y < GAP_ROW_END:
-                return False, "out_of_bounds"
-
-            cell = (x, y)
-            if cell in runtime.obstacles:
-                return False, "occupied"
-            if cell in runtime.pies:
-                return False, "occupied"
-            for snake in runtime.snakes.values():
-                if cell in snake.body:
-                    return False, "occupied"
-
-            kind_key = str(kind).strip().lower()
-            if kind_key in {"yellow", "orange"}:
-                metadata: dict[str, object] = {
-                    "kind": "yellow",
-                    "effect": "opponent_damage",
-                    "amount": 40,
-                    "points": -40,
-                }
-            elif kind_key == "red":
-                metadata = {
-                    "kind": "red",
-                    "effect": "self_damage",
-                    "amount": 40,
-                    "points": -40,
-                }
-            else:
-                metadata = {
-                    "kind": "green",
-                    "effect": "self_heal",
-                    "amount": 30,
-                    "points": 30,
-                }
-
-            runtime.pies[cell] = metadata
-            runtime.pie_counter += 1
-            # Clear the active throw target once a pie lands there.
-            if runtime.throw_target is not None and (runtime.throw_target["x"], runtime.throw_target["y"]) == cell:
-                runtime.throw_target = None
-            return True, "spawned"
-
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Sprint 5 PBI 5.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def get_idle_users(self) -> list[str]:
         """Sprint 5 PBI 5.3: list online users who are not in active matches."""
 
@@ -1023,6 +1097,9 @@ class ServerState:
             online_users = self._online_usernames_locked()
             return sorted([user for user in online_users if user not in self._user_to_match], key=str.casefold)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Internal cleanup for invitation/match state linked to a user.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _cleanup_user_lobby_state(self, username: str) -> None:
         """Internal cleanup for invitation/match state linked to a user."""
 
@@ -1034,6 +1111,9 @@ class ServerState:
         if game_id is not None:
             self._teardown_match_locked(game_id)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Resolve any username casing to the canonical currently-registered value.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _resolve_username(self, username: str) -> str | None:
         """
         Resolve any username casing to the canonical currently-registered value.
@@ -1044,6 +1124,9 @@ class ServerState:
             return None
         return self._client_usernames.get(client_id)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Remove one match and clear all player->match links.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _teardown_match_locked(self, game_id: str) -> None:
         """
         Remove one match and clear all player->match links.
@@ -1063,6 +1146,9 @@ class ServerState:
         for player in players:
             self._user_to_match.pop(player, None)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Remove one user from spectator tracking while lock is held.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _remove_spectator_locked(self, username: str) -> bool:
         """Remove one user from spectator tracking while lock is held."""
 
@@ -1079,6 +1165,9 @@ class ServerState:
             self._match_spectators.pop(game_id, None)
         return True
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Resolve a user's active game id while holding lock.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _find_game_id_for_user_locked(self, username: str) -> str | None:
         """
         Resolve a user's active game id while holding lock.
@@ -1096,6 +1185,9 @@ class ServerState:
                 return candidate_game_id
         return None
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Remove pending invite state for one user while lock is held.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _cleanup_user_invites_locked(self, username: str) -> None:
         """Remove pending invite state for one user while lock is held."""
 
@@ -1103,11 +1195,17 @@ class ServerState:
         for from_user, to_user in invites_to_remove:
             self._pending_invites.pop((from_user, to_user), None)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Drop one username from quick-match queue while lock is held.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _remove_from_quick_queue_locked(self, username: str) -> None:
         """Drop one username from quick-match queue while lock is held."""
 
         self._quick_match_queue = [u for u in self._quick_match_queue if u != username]
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Check if a match is currently in reconnect handoff grace window.
+    # // Trigger: Called before state changes to enforce game and input rules.
     def _is_handoff_active_locked(self, game_id: str) -> bool:
         """Check if a match is currently in reconnect handoff grace window."""
 
@@ -1116,6 +1214,9 @@ class ServerState:
             return False
         return until > time.monotonic()
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Drop stale handoff metadata for a match when ttl elapsed.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _cleanup_expired_handoff_locked(self, game_id: str) -> None:
         """Drop stale handoff metadata for a match when ttl elapsed."""
 
@@ -1125,6 +1226,9 @@ class ServerState:
         if until <= time.monotonic():
             self._match_handoff_until.pop(game_id, None)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Allow username reclaim only during an active handoff window.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _can_reclaim_username_for_handoff_locked(self, normalized_username: str, owner_id: str) -> bool:
         """Allow username reclaim only during an active handoff window."""
 
@@ -1141,6 +1245,9 @@ class ServerState:
 
         return self._is_handoff_active_locked(owner_game_id)
 
+    # // Feature: Server State / Matchmaking
+    # // Purpose: Release username ownership when previous owner socket is already dead.
+    # // Trigger: Called by the server state / matchmaking flow when this helper is needed.
     def _release_stale_username_owner_locked(self, normalized_username: str, owner_id: str) -> bool:
         """
         Release username ownership when previous owner socket is already dead.

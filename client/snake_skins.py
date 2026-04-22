@@ -13,6 +13,9 @@ from shared.protocol import SKIN_COLORS, SnakeSkin
 _glow_cache: dict[tuple, pygame.Surface] = {}
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Implements the 'get glow surf' step of the snake cosmetics rendering system.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def _get_glow_surf(size: int, color: tuple) -> pygame.Surface:
     key = (size, color)
     if key not in _glow_cache:
@@ -23,6 +26,9 @@ def _get_glow_surf(size: int, color: tuple) -> pygame.Surface:
     return _glow_cache[key]
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Implements the 'darken' step of the snake cosmetics rendering system.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def _darken(color: tuple[int, int, int], factor: float = 0.6) -> tuple[int, int, int]:
     return (
         max(0, int(color[0] * factor)),
@@ -31,6 +37,9 @@ def _darken(color: tuple[int, int, int], factor: float = 0.6) -> tuple[int, int,
     )
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Implements the 'lighten' step of the snake cosmetics rendering system.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def _lighten(color: tuple[int, int, int], delta: int = 60) -> tuple[int, int, int]:
     return (
         min(255, color[0] + delta),
@@ -39,6 +48,9 @@ def _lighten(color: tuple[int, int, int], delta: int = 60) -> tuple[int, int, in
     )
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Overlay a pattern onto one body segment circle already drawn at (cx, cy).
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def draw_snake_pattern(
     surf: pygame.Surface,
     cx: int,
@@ -97,6 +109,9 @@ def draw_snake_pattern(
                 pygame.draw.circle(surf, dark, (cx + dx, cy + dy), dot_r)
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Draw the chosen hat sitting on top of a head centered at (cx, cy).
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def draw_snake_hat(
     surf: pygame.Surface,
     cx: int,
@@ -216,6 +231,9 @@ def draw_snake_hat(
         pygame.draw.rect(surf, (64, 42, 26), band, border_radius=2)
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Draw a tail accessory at the last segment, (dx, dy) is the outward direction vector.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def draw_snake_tail(
     surf: pygame.Surface,
     tx: int,
@@ -294,6 +312,9 @@ def draw_snake_tail(
         pygame.draw.line(surf, (146, 226, 140), (tx, ty), tip, 1)
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Draw eyes on a head segment.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def draw_snake_eyes(
     surf: pygame.Surface,
     cx: int,
@@ -380,6 +401,9 @@ def draw_snake_eyes(
             pygame.draw.circle(surf, (255, 255, 255), (ex - max(1, inner_r // 2), ey - max(1, inner_r // 2)), 1)
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Derive head/glow colors from a body color for consistent snake rendering.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def derive_skin_colors(
     body: tuple[int, int, int],
 ) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int, int]]:
@@ -389,6 +413,9 @@ def derive_skin_colors(
     return body, head, glow
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Interpolate extra positions between adjacent centres so segments overlap.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def _dense_centers(
     centers: list[tuple[float, float]],
     r: int,
@@ -415,6 +442,9 @@ def _dense_centers(
     return out
 
 
+# // Feature: Snake Cosmetics Rendering
+# // Purpose: Unified pool-snake-style renderer shared by preview and gameplay.
+# // Trigger: Called by the snake cosmetics rendering flow when this helper is needed.
 def draw_segmented_snake(
     surf: pygame.Surface,
     centers: list[tuple[float, float]],

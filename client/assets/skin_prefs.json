@@ -1,7 +1,7 @@
 {
-  "color": "bone",
+  "color": "none",
   "pattern": "solid",
   "hat": "none",
-  "tail": "fin",
-  "eyes": "fierce"
+  "tail": "none",
+  "eyes": "glow"
 }

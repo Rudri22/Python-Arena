@@ -13,7 +13,6 @@ This module owns the authoritative match simulation used by the server:
 from __future__ import annotations
 
 import random
-import time
 from dataclasses import dataclass, field
 
 from shared.protocol import (
@@ -69,7 +68,7 @@ PIE_TYPES: tuple[dict[str, object], ...] = (
     {"kind": "yellow", "effect": "opponent_damage", "amount": DEFAULT_PIE_DAMAGE, "points": -40},
     {"kind": "red", "effect": "self_damage", "amount": DEFAULT_PIE_DAMAGE, "points": -40},
 )
-# Interval bounds (in real-time seconds) between throw announcements.
+# Interval bounds (in real-time seconds) between authoritative server pie spawns.
 THROW_MIN_INTERVAL = 5
 THROW_MAX_INTERVAL = 8
 
@@ -130,6 +129,9 @@ class MatchRuntime:
     throw_target: dict | None = field(default=None)
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Build initial match state.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRuntime:
     """
     Build initial match state.
@@ -164,6 +166,9 @@ def create_match_runtime(game_id: str, player_a: str, player_b: str) -> MatchRun
     return runtime
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Queue one player's direction change for the next simulation step.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def queue_direction(runtime: MatchRuntime, player: str, direction: str) -> tuple[bool, str]:
     """Queue one player's direction change for the next simulation step."""
 
@@ -184,6 +189,9 @@ def queue_direction(runtime: MatchRuntime, player: str, direction: str) -> tuple
     return True, "queued"
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Return True when all alive players provided movement input.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def should_step(runtime: MatchRuntime) -> bool:
     """Return True when all alive players provided movement input."""
 
@@ -193,6 +201,9 @@ def should_step(runtime: MatchRuntime) -> bool:
     return runtime.status == "running"
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Compute snake body length as a health-proportional value.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def _target_length_for_health(health: int) -> int:
     """
     Compute snake body length as a health-proportional value.
@@ -210,6 +221,9 @@ def _target_length_for_health(health: int) -> int:
     return max(MIN_SNAKE_LENGTH, int(round(scaled_length)))
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Resize body (extend/shrink) so visual length stays proportional to health.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def _sync_snake_length_to_health(snake: SnakeRuntime) -> None:
     """Resize body (extend/shrink) so visual length stays proportional to health."""
 
@@ -222,6 +236,9 @@ def _sync_snake_length_to_health(snake: SnakeRuntime) -> None:
         snake.body.extend([snake.body[-1]] * (target_length - current_length))
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Advance one simulation tick.
+# // Trigger: Called by the simulation/game loop to advance runtime state.
 def step_runtime(runtime: MatchRuntime) -> None:
     """
     Advance one simulation tick.
@@ -333,16 +350,20 @@ def step_runtime(runtime: MatchRuntime) -> None:
         snake.alive = snake.health > 0
         _sync_snake_length_to_health(snake)
 
-    # Announce a new throw target periodically; clients aim their blobs here and
-    # send spawn_pie when the blob lands — the server then places the pie.
+    # Authoritatively spawn pies on the server at timed intervals.
+    # We still expose `throw_target` so clients can render the serpent throw
+    # animation, but board mutation happens here (not from client actions).
     if runtime.tick >= runtime.next_throw_tick:
         cell_and_pie = _pick_random_spawn(runtime)
         if cell_and_pie is not None:
             (cx, cy), pie_template = cell_and_pie
+            spawn_id = runtime.pie_counter
+            runtime.pies[(cx, cy)] = dict(pie_template)
+            runtime.pie_counter += 1
             runtime.throw_target = {
                 "x": cx, "y": cy,
                 "kind": str(pie_template["kind"]),
-                "id": runtime.pie_counter,
+                "id": spawn_id,
             }
         runtime.next_throw_tick = runtime.tick + random.randint(
             THROW_MIN_INTERVAL, THROW_MAX_INTERVAL
@@ -351,6 +372,9 @@ def step_runtime(runtime: MatchRuntime) -> None:
     _update_match_status(runtime)
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Convert runtime match state into protocol `game_state` dictionary.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def to_protocol_state(runtime: MatchRuntime) -> dict:
     """Convert runtime match state into protocol `game_state` dictionary."""
 
@@ -425,12 +449,15 @@ def to_protocol_state(runtime: MatchRuntime) -> dict:
     # Provide numeric state for clients that expect 1=running, 0=not-running.
     state_dict["status_code"] = 1 if runtime.status == "running" else 0
     state_dict["countdown"] = runtime.countdown_ticks
-    # Broadcast active throw target so clients can aim blobs and send spawn_pie.
+    # Broadcast active throw target so clients can animate throws in sync.
     if runtime.throw_target is not None:
         state_dict["throw_target"] = runtime.throw_target
     return state_dict
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Return a (cell, pie_template) for the next throw, or None if the board is full.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def _pick_random_spawn(
     runtime: MatchRuntime,
 ) -> tuple[tuple[int, int], dict] | None:
@@ -453,6 +480,9 @@ def _pick_random_spawn(
     return random.choice(valid), dict(random.choice(PIE_TYPES))
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Evaluate end conditions and compute winner when match is over.
+# // Trigger: Called by the simulation/game loop to advance runtime state.
 def _update_match_status(runtime: MatchRuntime) -> None:
     """Evaluate end conditions and compute winner when match is over."""
 
@@ -470,6 +500,9 @@ def _update_match_status(runtime: MatchRuntime) -> None:
         return
 
 
+# // Feature: Authoritative Gameplay Simulation
+# // Purpose: Break ties by health; returns None for a draw.
+# // Trigger: Called by the authoritative gameplay simulation flow when this helper is needed.
 def _winner_by_health(runtime: MatchRuntime) -> str | None:
     """Break ties by health; returns None for a draw."""
 
