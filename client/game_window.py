@@ -1,11 +1,4 @@
-"""Arena renderer rebuilt as a clean 2.5D tile map scene.
-
-This version intentionally focuses on environment art only:
-- no gameplay HUD
-- no scores/chat text
-- no characters/snake entities
-- centered camera with split battlefield + castle bases
-"""
+"""Arena renderer rebuilt as a clean 2.5D tile map scene."""
 
 from __future__ import annotations
 
@@ -112,7 +105,7 @@ _OPPOSITE_DIRECTION: dict[str, str] = {
 
 
 class PygameArenaWindow:
-    """Static arena scene with tile grid + castle assets."""
+    """Static arena scene with tile grid assets."""
 
     def __init__(
         self,
@@ -161,7 +154,6 @@ class PygameArenaWindow:
         self.arena_x = (WINDOW_WIDTH - self.arena_w) // 2
         self.arena_y = ARENA_TOP
         self.split_col = self.grid_cols // 2
-        self.castle_wall = self._load_castle_wall("castle_wall.png")
         self.inner_land_texture = self._normalize_tile_color(
             self._load_terrain_tile_texture("inner land.png"))
         self.border_land_texture = self._normalize_tile_color(self._make_black_transparent(
@@ -173,16 +165,6 @@ class PygameArenaWindow:
             pygame.transform.flip(self.left_corner_texture, True, False)
             if self.left_corner_texture else None
         )
-        self.left_of_castle_corner_texture = self._normalize_tile_color(self._make_black_transparent(
-            self._load_first_terrain_texture(
-                ["leftofcastlecorner(2).png", "leftofcastlecorner (2).png", "leftofcastlecorner.png"],
-                crop_anchor="left_bottom",
-            )))
-        self.right_of_castle_corner_texture = self._normalize_tile_color(self._make_black_transparent(
-            self._load_first_terrain_texture(
-                ["rightofcastlecorner(2).png", "rightofcastlecorner (2).png", "rightofcastlecorner.png"],
-                crop_anchor="right_bottom",
-            )))
         self.top_left_texture = self._normalize_tile_color(self._make_black_transparent(
             self._load_terrain_tile_texture("topleft.png", crop_anchor="left_top")))
         self.top_right_texture = self._normalize_tile_color(self._make_black_transparent(
@@ -196,7 +178,6 @@ class PygameArenaWindow:
         )
         self.top_side_texture = self._normalize_tile_color(self._make_black_transparent(
             self._load_terrain_tile_texture("top side.png", crop_anchor="center")))
-        self.castle_tile_texture = self._build_castle_tile_texture(self.castle_wall)
         self.lava_frames = self._load_lava_frames()
         self.lava_rock_frames = self._load_lava_rock_frames()
 
@@ -427,100 +408,6 @@ class PygameArenaWindow:
             if found is not None:
                 return found
         return fallback
-
-    # ------------------------------------------------------------------
-    # Castle wall loading (kept for castle_tile_texture; never drawn)
-    # ------------------------------------------------------------------
-
-    def _load_castle_wall(self, filename: str) -> pygame.Surface | None:
-        """Load unified top wall and strip uniform backdrop to transparency."""
-
-        path = ARENA_DIR / filename
-        if not path.exists():
-            return None
-        try:
-            src = pygame.image.load(str(path)).convert_alpha()
-        except pygame.error:
-            return None
-
-        cleaned = self._remove_wall_backdrop(src)
-        w, h = cleaned.get_size()
-        outside = [[False] * w for _ in range(h)]
-        q: deque[tuple[int, int]] = deque()
-
-        def _push_if_outside(x: int, y: int) -> None:
-            if outside[y][x]:
-                return
-            if cleaned.get_at((x, y)).a != 0:
-                return
-            outside[y][x] = True
-            q.append((x, y))
-
-        for x in range(w):
-            _push_if_outside(x, 0)
-            _push_if_outside(x, h - 1)
-        for y in range(h):
-            _push_if_outside(0, y)
-            _push_if_outside(w - 1, y)
-
-        while q:
-            x, y = q.popleft()
-            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                if 0 <= nx < w and 0 <= ny < h:
-                    _push_if_outside(nx, ny)
-
-        opaque = pygame.Surface((w, h), pygame.SRCALPHA)
-        filler = (44, 44, 52, 255)
-        for y in range(h):
-            for x in range(w):
-                r, g, b, a = cleaned.get_at((x, y))
-                if outside[y][x]:
-                    continue
-                if a > 0:
-                    opaque.set_at((x, y), (r, g, b, 255))
-                else:
-                    opaque.set_at((x, y), filler)
-
-        green_eyes: list[tuple[int, int]] = []
-        red_eyes: list[tuple[int, int]] = []
-        for y in range(h):
-            for x in range(w):
-                r, g, b, a = opaque.get_at((x, y))
-                if a < 8:
-                    continue
-                if g > 70 and (g - r) > 20 and (g - b) > 16:
-                    green_eyes.append((x, y))
-                elif r > 90 and (r - g) > 25 and (r - b) > 18:
-                    red_eyes.append((x, y))
-
-        tinted = pygame.Surface((w, h), pygame.SRCALPHA)
-        tint_r, tint_g, tint_b = 82, 48, 66
-        for y in range(h):
-            for x in range(w):
-                r, g, b, a = opaque.get_at((x, y))
-                if a == 0:
-                    continue
-                luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
-                t = (luma / 160.0) ** 0.65
-                nr = min(255, int(tint_r * t * 1.8 + 12))
-                ng = min(255, int(tint_g * t * 1.8 + 8))
-                nb = min(255, int(tint_b * t * 1.8 + 10))
-                tinted.set_at((x, y), (nr, ng, nb, a))
-
-        for ex, ey in green_eyes:
-            tinted.set_at((ex, ey), (34, 255, 85, 255))
-        for ex, ey in red_eyes:
-            tinted.set_at((ex, ey), (255, 51, 51, 255))
-        glow = pygame.Surface((w, h), pygame.SRCALPHA)
-        for ex, ey in green_eyes:
-            pygame.draw.circle(glow, (0, 255, 68, 56), (ex, ey), 5)
-            pygame.draw.circle(glow, (0, 255, 68, 26), (ex, ey), 8)
-        for ex, ey in red_eyes:
-            pygame.draw.circle(glow, (255, 34, 34, 58), (ex, ey), 5)
-            pygame.draw.circle(glow, (255, 34, 34, 28), (ex, ey), 8)
-        tinted.blit(glow, (0, 0))
-
-        return tinted
 
     def _load_dj_set_art(self) -> pygame.Surface | None:
         """Load user-provided DJ deck art used by the arena snake idle scene."""
@@ -837,78 +724,6 @@ class PygameArenaWindow:
             self._throw_blob_spawned = True
         return True
 
-    def _remove_wall_backdrop(self, src: pygame.Surface) -> pygame.Surface:
-        """Remove flat background by color-distance from corner samples."""
-
-        w, h = src.get_size()
-        out = src.copy()
-
-        corners = [
-            src.get_at((0, 0)),
-            src.get_at((w - 1, 0)),
-            src.get_at((0, h - 1)),
-            src.get_at((w - 1, h - 1)),
-        ]
-        bg_r = sum(c.r for c in corners) // 4
-        bg_g = sum(c.g for c in corners) // 4
-        bg_b = sum(c.b for c in corners) // 4
-
-        hard_cut = 22
-
-        for y in range(h):
-            for x in range(w):
-                c = out.get_at((x, y))
-                dr = c.r - bg_r
-                dg = c.g - bg_g
-                db = c.b - bg_b
-                dist = (dr * dr + dg * dg + db * db) ** 0.5
-
-                if dist <= hard_cut:
-                    out.set_at((x, y), (c.r, c.g, c.b, 0))
-                else:
-                    out.set_at((x, y), (c.r, c.g, c.b, 255))
-
-        rect = out.get_bounding_rect(min_alpha=8)
-        if rect.width > 0 and rect.height > 0:
-            trimmed = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-            trimmed.blit(out, (0, 0), rect)
-            return trimmed
-        return out
-
-    def _build_castle_tile_texture(self, wall: pygame.Surface | None) -> pygame.Surface | None:
-        """Build dark brick texture matching the provided reference style."""
-
-        tex = pygame.Surface((TILE_SIZE, TILE_SIZE))
-        tex.fill((22, 22, 24))
-
-        brick_h = max(8, TILE_SIZE // 5)
-        brick_w = max(14, TILE_SIZE // 2)
-        for row in range(0, TILE_SIZE + brick_h, brick_h):
-            row_index = row // brick_h
-            x_offset = 0 if row_index % 2 == 0 else (brick_w // 2)
-            for col in range(-brick_w, TILE_SIZE + brick_w, brick_w):
-                bx = col + x_offset
-                by = row
-                bw = brick_w - 2
-                bh = brick_h - 2
-                if bx + bw < 0 or bx >= TILE_SIZE:
-                    continue
-
-                brick_hash = (row_index * 92821) ^ (col * 68917)
-                tone = ((brick_hash & 7) - 3) * 3
-                base = 76 + tone
-                color = (
-                    max(48, min(118, base)),
-                    max(48, min(118, base)),
-                    max(52, min(122, base + 4)),
-                )
-                brick = pygame.Rect(bx, by, bw, bh)
-                pygame.draw.rect(tex, color, brick)
-                pygame.draw.line(tex, (96, 96, 106), (brick.left, brick.top), (brick.right - 1, brick.top), 1)
-                pygame.draw.line(tex, (42, 42, 48), (brick.left, brick.bottom - 1), (brick.right - 1, brick.bottom - 1), 1)
-
-        return tex
-
     def _load_terrain_tile_texture(self, filename: str, crop_anchor: str = "center") -> pygame.Surface | None:
         """Load a terrain texture and crop/scale it to one tile."""
 
@@ -943,15 +758,6 @@ class PygameArenaWindow:
             return pygame.transform.smoothscale(square, (TILE_SIZE, TILE_SIZE))
         except pygame.error:
             return None
-
-    def _load_first_terrain_texture(self, filenames: list[str], crop_anchor: str = "center") -> pygame.Surface | None:
-        """Try multiple filename variants and return the first texture that loads."""
-
-        for name in filenames:
-            tex = self._load_terrain_tile_texture(name, crop_anchor=crop_anchor)
-            if tex is not None:
-                return tex
-        return None
 
     def _make_black_transparent(self, tex: pygame.Surface | None) -> pygame.Surface | None:
         """Turn near-black background pixels transparent so lava shows through."""
@@ -1277,10 +1083,6 @@ class PygameArenaWindow:
             selected_texture = self.left_corner_texture or self.border_land_texture
         elif corner_type == "right":
             selected_texture = self.right_corner_texture or self.border_land_texture
-        elif corner_type == "left_of_castle":
-            selected_texture = self.left_of_castle_corner_texture or self.border_land_texture
-        elif corner_type == "right_of_castle":
-            selected_texture = self.right_of_castle_corner_texture or self.border_land_texture
         elif corner_type == "top_left":
             selected_texture = self.top_left_texture or self.border_land_texture
         elif corner_type == "top_right":
@@ -1295,8 +1097,6 @@ class PygameArenaWindow:
             selected_texture = self.border_land_texture if border_row else self.inner_land_texture
         if selected_texture is not None:
             self.screen.blit(selected_texture, (rect.x, rect.y))
-        elif self.castle_tile_texture is not None:
-            self.screen.blit(self.castle_tile_texture, (rect.x, rect.y))
         else:
             pygame.draw.rect(self.screen, fill, rect)
 
@@ -1327,13 +1127,6 @@ class PygameArenaWindow:
         frame = self.lava_rock_frames[(pygame.time.get_ticks() // 110) % len(self.lava_rock_frames)]
         rw, rh = frame.get_size()
 
-        castle_layout = self._compute_castle_layout()
-        if castle_layout is None:
-            castle_exclusion = pygame.Rect(0, 0, 0, 0)
-        else:
-            cx, cy, cw, ch = castle_layout
-            castle_exclusion = pygame.Rect(cx, cy, cw, ch).inflate(TILE_SIZE * 3, TILE_SIZE * 2)
-
         grid_rect = pygame.Rect(self.arena_x, self.arena_y - (SIDE_EXTENSION_ROWS * TILE_SIZE), self.arena_w, self.arena_h + (SIDE_EXTENSION_ROWS * TILE_SIZE))
 
         step_x = max(28, int(TILE_SIZE * 1.05))
@@ -1351,43 +1144,9 @@ class PygameArenaWindow:
                 r = pygame.Rect(px, py, rw, rh)
                 if r.colliderect(grid_rect):
                     continue
-                if r.colliderect(castle_exclusion):
-                    continue
                 self.screen.blit(frame, (px, py))
-
-    def _compute_castle_layout(self) -> tuple[int, int, int, int] | None:
-        """Compute castle (x, y, width, height) — kept for rock exclusion zone."""
-
-        if self.castle_wall is None:
-            return None
-        src_w, src_h = self.castle_wall.get_size()
-        if src_w <= 0 or src_h <= 0:
-            return None
-
-        canvas_height = self.screen.get_height()
-        canvas_width = self.screen.get_width()
-        aspect_ratio = src_w / src_h
-
-        scaled_w = int(canvas_width * 0.65)
-        scaled_h = int(scaled_w / aspect_ratio)
-
-        max_allowed_h = int(canvas_height * 0.95)
-        if scaled_h > max_allowed_h:
-            scaled_h = max_allowed_h
-            scaled_w = int(scaled_h * aspect_ratio)
-
-        x = (canvas_width - scaled_w) // 2
-        y = self.arena_y - scaled_h
-
-        if y < 5:
-            scaled_h = self.arena_y - 5
-            scaled_w = int(scaled_h * aspect_ratio)
-            x = (canvas_width - scaled_w) // 2
-            y = 5
-        return (x, y, scaled_w, scaled_h)
-
     # ------------------------------------------------------------------
-    # Giant arch serpent (replaces castle above the grid)
+    # Giant arch serpent above the grid.
     # ------------------------------------------------------------------
 
     # ---- throw state machine helpers (big serpent) -------------------
@@ -2223,11 +1982,8 @@ class PygameArenaWindow:
 
         for row in range(1, SIDE_EXTENSION_ROWS + 1):
             y = self.arena_y - (row * TILE_SIZE)
-            row_from_top = SIDE_EXTENSION_ROWS - row + 1
             for col in range(SIDE_EXTENSION_TILES):
                 x = self.arena_x + col * TILE_SIZE
-                is_castle_border_left = (row in {2, 3}) and (col == SIDE_EXTENSION_TILES - 1)
-                is_target_row_left_border = (row_from_top == 4) and (col == SIDE_EXTENSION_TILES - 1)
                 self._draw_tile(
                     x,
                     y,
@@ -2236,33 +1992,20 @@ class PygameArenaWindow:
                     top_edge=(
                         row == SIDE_EXTENSION_ROWS
                         and col not in {0, SIDE_EXTENSION_TILES - 1}
-                        and not is_castle_border_left
                     ),
                     corner_type=(
                         "top_left"
                         if (row == SIDE_EXTENSION_ROWS and col == 0)
-                        else "left_of_castle"
-                        if (
-                            row == SIDE_EXTENSION_ROWS
-                            and col == SIDE_EXTENSION_TILES - 1
-                            and not is_castle_border_left
-                        )
                         else None
                     ),
                     edge_type=(
-                        "right"
-                        if is_target_row_left_border
-                        else "right"
-                        if is_castle_border_left
-                        else "left"
+                        "left"
                         if col == 0
                         else None
                     ),
                 )
             for col in range(self.grid_cols - SIDE_EXTENSION_TILES, self.grid_cols):
                 x = self.arena_x + col * TILE_SIZE
-                is_castle_border_right = (row in {2, 3}) and (col == self.grid_cols - SIDE_EXTENSION_TILES)
-                is_target_row_right_border = (row_from_top == 4) and (col == self.grid_cols - SIDE_EXTENSION_TILES)
                 self._draw_tile(
                     x,
                     y,
@@ -2271,25 +2014,14 @@ class PygameArenaWindow:
                     top_edge=(
                         row == SIDE_EXTENSION_ROWS
                         and col not in {self.grid_cols - SIDE_EXTENSION_TILES, self.grid_cols - 1}
-                        and not is_castle_border_right
                     ),
                     corner_type=(
-                        "right_of_castle"
-                        if (
-                            row == SIDE_EXTENSION_ROWS
-                            and col == self.grid_cols - SIDE_EXTENSION_TILES
-                            and not is_castle_border_right
-                        )
-                        else "top_right"
+                        "top_right"
                         if (row == SIDE_EXTENSION_ROWS and col == self.grid_cols - 1)
                         else None
                     ),
                     edge_type=(
-                        "left"
-                        if is_target_row_right_border
-                        else "left"
-                        if is_castle_border_right
-                        else "right"
+                        "right"
                         if col == self.grid_cols - 1
                         else None
                     ),

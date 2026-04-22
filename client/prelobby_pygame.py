@@ -94,6 +94,51 @@ How to read this file quickly:
 - Entry helpers (`run_prelobby_to_lobby`, `main`)
 """
 
+# Frontend feature names and ownership map.
+# Keep these IDs stable so backend and QA references stay aligned.
+PRELOBBY_FEATURES: dict[str, dict[str, str]] = {
+    "PRE_01_MUSIC_TOGGLE": {
+        "ui": "Top-left music icon button (music on/off).",
+        "frontend_owner": "PreLobby._music_center + PreLobby._handle_click + MusicController.toggle",
+        "backend_owner": "None (local-only audio toggle).",
+    },
+    "PRE_02_STATUS_BADGE": {
+        "ui": "Status badge: IDLE / TYPING / READY.",
+        "frontend_owner": "PreLobby._draw_ui (status derivation from name input state)",
+        "backend_owner": "None (local-only state feedback).",
+    },
+    "PRE_03_DEPLOY_NAME_INPUT": {
+        "ui": "Deploy name text box with cursor/editing and 0/16 counter.",
+        "frontend_owner": "PreLobby._events + PreLobby._draw_ui",
+        "backend_owner": "Validated and registered in lobby via USERNAME message (PygameLobbyScene._connect/_retry_username_if_due).",
+    },
+    "PRE_04_SUGGESTED_NAMES": {
+        "ui": "Suggested-name pills under the input.",
+        "frontend_owner": "PreLobby.suggestions + PreLobby._suggestion_rects + PreLobby._handle_click",
+        "backend_owner": "None (local-only autofill helpers).",
+    },
+    "PRE_05_DEPLOY_BUTTON": {
+        "ui": "DEPLOY action button.",
+        "frontend_owner": "PreLobby._deploy_rect + PreLobby._handle_click + PreLobby._attempt_deploy",
+        "backend_owner": "Triggers lobby entry, then USERNAME submission to server in PygameLobbyScene.",
+    },
+    "PRE_06_DEPLOY_TRANSITION": {
+        "ui": "Eye-close/blackout transition from pre-lobby into lobby.",
+        "frontend_owner": "PreLobby._deploy_close_progress + PreLobby.update + PreLobby.draw",
+        "backend_owner": "None (local scene transition).",
+    },
+    "LOB_01_USERNAME_SUBMISSION": {
+        "ui": "Post-deploy username handoff to multiplayer lobby.",
+        "frontend_owner": "PygameLobbyScene._connect + make_username_message",
+        "backend_owner": "server/client_handler.py -> handle_incoming_message(MessageType.USERNAME)",
+    },
+    "LOB_02_ONLINE_AND_LEADERBOARD_SYNC": {
+        "ui": "Online list + leaderboard data refresh.",
+        "frontend_owner": "PygameLobbyScene._handle_message for ONLINE_USERS payload updates",
+        "backend_owner": "server/client_handler.py -> broadcast_online_users + server/state.py snapshots",
+    },
+}
+
 WIDTH = 1280
 HEIGHT = 720
 FPS = 60
@@ -882,6 +927,7 @@ class PreLobby:
     def _card_rect(self) -> pygame.Rect:
         return pygame.Rect(self.w // 2 - 285, self.h // 2 - 215, 570, 430)
 
+    # Feature: PRE_01_MUSIC_TOGGLE (music button anchor point).
     def _music_center(self) -> pygame.Vector2:
         return pygame.Vector2(92, 84)
 
@@ -1000,6 +1046,8 @@ class PreLobby:
             pygame.draw.line(surf, (130, 156, 198), (head_x - 16, arm_y), (head_x - 28, arm_y + 2), 4)
             pygame.draw.line(surf, (130, 156, 198), (head_x + 16, arm_y), (head_x + 28, arm_y + 2), 4)
 
+    # Features: PRE_01_MUSIC_TOGGLE, PRE_02_STATUS_BADGE, PRE_03_DEPLOY_NAME_INPUT,
+    # PRE_04_SUGGESTED_NAMES, PRE_05_DEPLOY_BUTTON.
     def _draw_ui(self, surf: pygame.Surface, bg_under: pygame.Surface | None = None) -> None:
         intro_t = min(1.0, (pygame.time.get_ticks() - self.ui_intro_ms) / 600.0)
         ease = 1 - (1 - intro_t) ** 3
@@ -1159,7 +1207,6 @@ class PreLobby:
 
         # suggestion pills (centered and kept inside card)
         self.hovered_suggestion = -1
-        sug_icons = ["~", "*", "+", "#", "@", "%"]
         for i, (sug, pill) in enumerate(zip(self.suggestions, self._suggestion_rects(input_rect, card))):
             hov = pill.collidepoint(mouse)
             if hov:
@@ -1169,10 +1216,8 @@ class PreLobby:
             fill = (24, 48, 80, 238) if not hov else (34, 68, 104, 248)
             draw_round_rect(surf, pill, fill, 12)
             draw_round_rect(surf, pill, (68, 122, 180) if not hov else (72, 214, 152), 12, 1)
-            icon_txt = self.small.render(sug_icons[i % len(sug_icons)], True, (72, 214, 152))
             label = self.small.render(sug, True, (208, 220, 236))
-            surf.blit(icon_txt, (pill.x + 10, pill.y + 8))
-            surf.blit(label, (pill.x + 32, pill.y + 8))
+            surf.blit(label, (pill.x + 12, pill.y + 8))
 
         # top-left music control (restored)
         m = self._music_center() + pygame.Vector2(0, dy)
@@ -1263,6 +1308,7 @@ class PreLobby:
                 reveal = bg_under.subsurface(reveal_rect).copy()
                 reveal.set_alpha(fade_alpha)
                 surf.blit(reveal, reveal_rect.topleft)
+    # Features: PRE_01_MUSIC_TOGGLE, PRE_03_DEPLOY_NAME_INPUT, PRE_04_SUGGESTED_NAMES, PRE_05_DEPLOY_BUTTON.
     def _handle_click(self, pos: tuple[int, int]) -> bool:
         m = self._music_center()
         input_rect = self._input_rect()
@@ -1306,6 +1352,7 @@ class PreLobby:
 
         return handled_ui
 
+    # Features: PRE_03_DEPLOY_NAME_INPUT, PRE_05_DEPLOY_BUTTON (mouse/keyboard deploy flow).
     def _events(self) -> None:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
@@ -1368,6 +1415,7 @@ class PreLobby:
                 return idx
         return len(text)
 
+    # Feature: PRE_05_DEPLOY_BUTTON (validation + deploy trigger).
     def _attempt_deploy(self) -> None:
         candidate = self.name_text.strip()
         if not self._name_is_valid():
@@ -1387,12 +1435,14 @@ class PreLobby:
         self.deploy_transition_active = True
         self.deploy_transition_start_ms = pygame.time.get_ticks()
 
+    # Feature: PRE_06_DEPLOY_TRANSITION.
     def _deploy_close_progress(self) -> float:
         if not self.deploy_transition_active:
             return 0.0
         elapsed = pygame.time.get_ticks() - self.deploy_transition_start_ms
         return min(1.0, max(0.0, elapsed / max(1, self.deploy_transition_duration_ms)))
 
+    # Feature: PRE_06_DEPLOY_TRANSITION (ends scene when close animation completes).
     def update(self) -> None:
         self.frame += 1
         self._update_snakes()
@@ -1403,6 +1453,7 @@ class PreLobby:
         if self.invalid_feedback_frames > 0:
             self.invalid_feedback_frames -= 1
 
+    # Features: PRE_02_STATUS_BADGE, PRE_06_DEPLOY_TRANSITION (render step).
     def draw(self) -> None:
         frame = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
         self._draw_background(frame)
@@ -1420,6 +1471,7 @@ class PreLobby:
         self.screen.blit(frame, (0, 0))
         pygame.display.flip()
 
+    # Features: PRE_03_DEPLOY_NAME_INPUT, PRE_05_DEPLOY_BUTTON, PRE_06_DEPLOY_TRANSITION (main loop).
     def run(self, *, keep_pygame: bool = False) -> tuple[str | None, int]:
         while self.running:
             self._events()
@@ -1487,7 +1539,6 @@ class PygameLobbyScene:
         self.font_snake_panel = pygame.font.SysFont("papyrus", 36, bold=True)
         self.font_cinzel = pygame.font.SysFont("Cinzel Decorative", 15, bold=True)
         self.cup_icon = self._load_asset_icon("cup.gif")
-        self.eye_icon = self._load_asset_icon("eye.png")
         self.rank1_icon = self._load_asset_icon("rank1.png")
         self.rank2_icon = self._load_asset_icon("rank2.png")
         self.rank3_icon = self._load_asset_icon("rank3.png")
@@ -1721,6 +1772,7 @@ class PygameLobbyScene:
             return self.private_chat_threads.get(self.active_private_target, [])
         return self.chat_bubbles
 
+    # Feature: LOB_01_USERNAME_SUBMISSION (send username + skin + chat endpoint).
     def _connect(self) -> None:
         try:
             self.connection = ClientConnection(server_ip=self.server_ip, server_port=self.server_port)
@@ -1743,6 +1795,7 @@ class PygameLobbyScene:
         except OSError as error:
             self._append_log(f"[ERROR] Username submit failed: {error}")
 
+    # Feature: LOB_01_USERNAME_SUBMISSION (retry path when username collision happens).
     def _retry_username_if_due(self) -> None:
         if self.connection is None:
             return
@@ -1835,6 +1888,7 @@ class PygameLobbyScene:
                 break
             self._handle_message(msg)
 
+    # Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (consumes ONLINE_USERS snapshots).
     def _handle_message(self, message: dict[str, Any]) -> None:
         msg_type = message.get("type")
         payload = message.get("payload", {})
@@ -4288,6 +4342,7 @@ class PygameLobbyScene:
         )
 
 
+# Features: PRE_05_DEPLOY_BUTTON + LOB_01_USERNAME_SUBMISSION handoff.
 def run_prelobby_to_lobby(
     *,
     server_ip: str,

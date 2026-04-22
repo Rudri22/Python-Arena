@@ -43,7 +43,7 @@ HEAD_TO_HEAD_DAMAGE = 25
 MAX_MATCH_TICKS = 300
 
 # Visual island layout — must mirror client/game_window.py metrics.
-# The board's top (rows 0-6) is the castle-extension / serpent gap above the island.
+# The board's top (rows 0-6) is the serpent gap above the island.
 # Rows 7-18 (cols 1-18) are the playable island surface.
 ISLAND_ROW_MIN = 7   # ceil(SIDE_EXTENSION_ROWS * TILE_SIZE / GAME_CELL_H) = ceil(6.15)
 ISLAND_COL_MIN = 1

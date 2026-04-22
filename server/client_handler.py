@@ -26,6 +26,19 @@ from shared.protocol import (
 )
 from shared.utils import encode_message_for_socket, split_socket_buffer
 
+# Backend feature map for prelobby/lobby ownership.
+# These IDs mirror the frontend list in `client/prelobby_pygame.py`.
+BACKEND_FEATURES: dict[str, str] = {
+    "PRE_01_MUSIC_TOGGLE": "No backend handling (client-local audio only).",
+    "PRE_02_STATUS_BADGE": "No backend handling (client-local typing/ready state).",
+    "PRE_03_DEPLOY_NAME_INPUT": "Validated on username submission in handle_incoming_message -> MessageType.USERNAME.",
+    "PRE_04_SUGGESTED_NAMES": "No backend handling (client-local suggestion chips).",
+    "PRE_05_DEPLOY_BUTTON": "Indirect: deploy proceeds to lobby where username is submitted to server.",
+    "PRE_06_DEPLOY_TRANSITION": "No backend handling (client-local transition animation).",
+    "LOB_01_USERNAME_SUBMISSION": "handle_incoming_message(USERNAME): uniqueness, skin/chat endpoint capture, lobby broadcast.",
+    "LOB_02_ONLINE_AND_LEADERBOARD_SYNC": "broadcast_online_users + ServerState snapshots (users, idle, matches, wins, chat peers).",
+}
+
 
 def send_message(client_socket: socket.socket, message: dict) -> None:
     """Send one protocol message as newline-delimited JSON bytes."""
@@ -33,6 +46,7 @@ def send_message(client_socket: socket.socket, message: dict) -> None:
     client_socket.sendall(encode_message_for_socket(message))
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (authoritative online/idle/match/wins/chat-peers snapshot).
 def broadcast_online_users(server_state: ServerState) -> None:
     """
     PBI 2.4: broadcast updated online users list to all connected clients.
@@ -60,6 +74,7 @@ def broadcast_online_users(server_state: ServerState) -> None:
             continue
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (waiting-state hint tied to roster size).
 def _send_waiting_status_if_needed(
     client_socket: socket.socket,
     server_state: ServerState,
@@ -76,6 +91,7 @@ def _send_waiting_status_if_needed(
         send_message(client_socket, waiting_message)
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (match assignment triggers roster refresh).
 def _handle_invitation_message(
     client_socket: socket.socket,
     payload: dict,
@@ -502,6 +518,7 @@ def _handle_movement_message(
     # duplicates here can build client-side backlogs and cause visible lag.
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (lobby/match social signals rely on active roster routing).
 def _handle_chat_message(
     client_socket: socket.socket,
     payload: dict,
@@ -594,6 +611,7 @@ def _handle_chat_message(
 _VALID_EMOTES: frozenset[str] = frozenset({"heheheha", "grrr", "cry"})
 
 
+# Feature: LOB_02_ONLINE_AND_LEADERBOARD_SYNC (emote routed to current live match participants/spectators).
 def _handle_emote_message(
     client_socket: socket.socket,
     payload: dict,
@@ -638,6 +656,7 @@ def _handle_emote_message(
             pass
 
 
+# Features: LOB_01_USERNAME_SUBMISSION, LOB_02_ONLINE_AND_LEADERBOARD_SYNC.
 def handle_incoming_message(
     client_socket: socket.socket,
     message: dict,
