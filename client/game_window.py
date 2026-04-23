@@ -1127,6 +1127,9 @@ class PygameArenaWindow:
                 scope="match",
                 game_id=self.active_game_id,
             )
+            if ok:
+                # Local echo keeps gameplay chat UX symmetric with lobby chat.
+                self.chat_messages.append(f"{self.username}: {text}")
             if not ok and error_text:
                 self.chat_messages.append(f"[CHAT] {error_text}")
         except OSError:

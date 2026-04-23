@@ -22,7 +22,6 @@ from shared.utils import encode_message_for_socket
 
 
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 5000
 BACKLOG = 20
 GAME_TICK_SECONDS = 0.12
 
@@ -35,12 +34,11 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Python-Arena backend server")
 
-    # PBI 1.4 requirement: support a port argument at startup.
+    # PBI 1.4 requirement: require an explicit port argument at startup.
     parser.add_argument(
-        "--port",
+        "port",
         type=int,
-        default=DEFAULT_PORT,
-        help=f"Port to bind the server on (default: {DEFAULT_PORT})",
+        help="Port to bind the server on (required).",
     )
 
     # Host is optional but useful when testing locally or on LAN.

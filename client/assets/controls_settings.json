@@ -1,8 +1,8 @@
 {
   "direction_bindings": {
-    "up": "up",
-    "left": "left",
-    "down": "down",
-    "right": "right"
+    "up": "w",
+    "left": "a",
+    "down": "s",
+    "right": "d"
   }
 }

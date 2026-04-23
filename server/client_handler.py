@@ -722,16 +722,18 @@ def handle_incoming_message(
 
         # Cosmetic skin chosen in the lobby travels with the username payload.
         server_state.set_client_skin(client_id, payload.get("skin"))
-        chat_host = str(payload.get("chat_host", "")).strip()
+        advertised_chat_host = str(payload.get("chat_host", "")).strip()
         try:
             chat_port = int(payload.get("chat_port", 0))
         except (TypeError, ValueError):
             chat_port = 0
-        if not chat_host:
-            try:
-                chat_host = str(client_socket.getpeername()[0]).strip()
-            except OSError:
-                chat_host = ""
+        # Keep chat strictly P2P, but prefer the server-observed client IP for
+        # endpoint advertisement to avoid one-way delivery from bad local host picks.
+        try:
+            observed_chat_host = str(client_socket.getpeername()[0]).strip()
+        except OSError:
+            observed_chat_host = ""
+        chat_host = observed_chat_host or advertised_chat_host
         if chat_host and 1 <= chat_port <= 65535:
             server_state.set_client_chat_endpoint(client_id, chat_host, chat_port)
 
