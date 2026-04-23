@@ -41,6 +41,14 @@ BACKEND_FEATURES: dict[str, str] = {
 
 
 # // Feature: Server Message Routing
+# // Purpose: Return True when an endpoint host is loopback/localhost and unsuitable for remote peers.
+# // Trigger: Called by the server message routing flow when this helper is needed.
+def _is_loopback_host(host: str) -> bool:
+    text = str(host or "").strip().lower()
+    return text == "localhost" or text.startswith("127.")
+
+
+# // Feature: Server Message Routing
 # // Purpose: Send one protocol message as newline-delimited JSON bytes.
 # // Trigger: Triggered when this system needs to open, close, or send network/audio data.
 def send_message(client_socket: socket.socket, message: dict) -> None:
@@ -727,13 +735,18 @@ def handle_incoming_message(
             chat_port = int(payload.get("chat_port", 0))
         except (TypeError, ValueError):
             chat_port = 0
-        # Keep chat strictly P2P, but prefer the server-observed client IP for
-        # endpoint advertisement to avoid one-way delivery from bad local host picks.
+        # Keep chat strictly P2P and avoid advertising loopback endpoints to
+        # remote peers (common when host runs client+server on one machine).
         try:
             observed_chat_host = str(client_socket.getpeername()[0]).strip()
         except OSError:
             observed_chat_host = ""
-        chat_host = observed_chat_host or advertised_chat_host
+        if advertised_chat_host and not _is_loopback_host(advertised_chat_host):
+            chat_host = advertised_chat_host
+        elif observed_chat_host and not _is_loopback_host(observed_chat_host):
+            chat_host = observed_chat_host
+        else:
+            chat_host = advertised_chat_host or observed_chat_host
         if chat_host and 1 <= chat_port <= 65535:
             server_state.set_client_chat_endpoint(client_id, chat_host, chat_port)
 

@@ -22,14 +22,34 @@ from shared.utils import encode_message_for_socket, split_socket_buffer
 def _detect_local_ip(server_ip: str) -> str:
     """Best-effort local IP detection used for P2P endpoint advertisement."""
 
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    loopback_ip = ""
+    probe_targets: list[tuple[str, int]] = [
+        (str(server_ip).strip(), 9),
+        ("8.8.8.8", 80),
+        ("1.1.1.1", 80),
+    ]
+    for host, port in probe_targets:
+        if not host:
+            continue
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((host, port))
+            ip = str(probe.getsockname()[0]).strip()
+            if ip and not ip.startswith("127."):
+                return ip
+            if ip:
+                loopback_ip = ip
+        except OSError:
+            pass
+        finally:
+            probe.close()
     try:
-        probe.connect((server_ip, 9))
-        return str(probe.getsockname()[0])
+        host_ip = str(socket.gethostbyname(socket.gethostname())).strip()
+        if host_ip and not host_ip.startswith("127."):
+            return host_ip
     except OSError:
-        return "127.0.0.1"
-    finally:
-        probe.close()
+        pass
+    return loopback_ip or "127.0.0.1"
 
 
 class _P2PChatNode:
@@ -141,8 +161,10 @@ class _P2PChatNode:
         failures: list[str] = []
         for target_name, (host, port) in targets:
             try:
-                peer_sock = socket.create_connection((host, port), timeout=1.4)
+                # Keep P2P chat responsive: fail fast on unreachable peers.
+                peer_sock = socket.create_connection((host, port), timeout=0.35)
                 try:
+                    peer_sock.settimeout(0.35)
                     peer_sock.sendall(raw)
                 finally:
                     peer_sock.close()
