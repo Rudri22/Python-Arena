@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import sys
 from collections import deque
 from pathlib import Path
 
@@ -12,6 +13,11 @@ import pygame
 
 import queue
 import threading
+
+# Support direct execution (`python client/game_window.py`) and module
+# execution (`python -m client.game_window`) from the project root.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from client.network import ClientConnection
 from client.snake_skins import (

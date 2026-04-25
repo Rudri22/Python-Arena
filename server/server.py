@@ -11,9 +11,16 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import socket
+import sys
 import threading
 import time
 from contextlib import closing
+from pathlib import Path
+
+# Support direct execution (`python server/server.py`) and module execution
+# (`python -m server.server`) without local package shadowing.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.client_handler import broadcast_online_users, handle_client_connection
 from server.state import ServerState

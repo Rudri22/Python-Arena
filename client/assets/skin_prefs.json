@@ -1,7 +1,7 @@
 {
-  "color": "dusk",
+  "color": "coral",
   "pattern": "solid",
-  "hat": "wizard",
-  "tail": "flame",
-  "eyes": "glow"
+  "hat": "none",
+  "tail": "none",
+  "eyes": "normal"
 }

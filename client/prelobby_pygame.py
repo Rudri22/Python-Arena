@@ -4,6 +4,7 @@ import json
 import math
 import queue
 import random
+import sys
 import threading
 import tempfile
 import wave
@@ -14,6 +15,11 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import pygame
+
+# Support direct execution (`python client/prelobby_pygame.py`) and module
+# execution (`python -m client.prelobby_pygame`) from the project root.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from client.network import ClientConnection
 from client.snake_skins import (
@@ -340,14 +346,21 @@ class MusicController:
 
 @dataclass
 class Star:
+    """Animated background star used by the pre-lobby scene."""
+
     x: float
     y: float
     phase: float
     size: int
 
 
+# // Feature: Pre-Lobby Animated Background
+# // Purpose: Track one short-lived burst particle in the pre-lobby scene.
+# // Trigger: Created by lobby visual effects and advanced each frame.
 @dataclass
 class Particle:
+    """Short-lived burst particle for food, deploy, and snake effects."""
+
     pos: pygame.Vector2
     vel: pygame.Vector2
     life: int
@@ -365,8 +378,13 @@ class Particle:
         self.radius *= 0.97
 
 
+# // Feature: Pre-Lobby Animated Background
+# // Purpose: Track one drifting smoke puff in the pre-lobby scene.
+# // Trigger: Created by lobby visual effects and advanced each frame.
 @dataclass
 class Smoke:
+    """Drifting smoke puff for pre-lobby visual effects."""
+
     pos: pygame.Vector2
     vel: pygame.Vector2
     life: int
@@ -383,14 +401,24 @@ class Smoke:
         self.life -= 1
 
 
+# // Feature: Pre-Lobby Animated Background
+# // Purpose: Represent one decorative food pellet used by lobby snakes.
+# // Trigger: Spawned by the pre-lobby animation loop.
 @dataclass
 class FoodPellet:
+    """Decorative food pellet chased by animated lobby snakes."""
+
     pos: pygame.Vector2
     life: int = -1
 
 
+# // Feature: Pre-Lobby Animated Background
+# // Purpose: Store runtime state for one animated decorative snake.
+# // Trigger: Updated and rendered by the pre-lobby animation loop.
 @dataclass
 class SnakeUnit:
+    """Runtime state for one decorative snake in the pre-lobby scene."""
+
     body: list[pygame.Vector2]
     velocity: pygame.Vector2
     target: pygame.Vector2

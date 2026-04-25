@@ -10,11 +10,9 @@ from pathlib import Path
 # Support direct execution (`python client/client.py`) and module execution (`python -m client.client`).
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from network import ClientConnection  # type: ignore
-    from shared.protocol import MessageType, make_username_message
-else:
-    from client.network import ClientConnection
-    from shared.protocol import MessageType, make_username_message
+
+from client.network import ClientConnection
+from shared.protocol import MessageType, make_username_message
 
 DEFAULT_SERVER_IP = "127.0.0.1"
 DEFAULT_SERVER_PORT = 5000
@@ -130,10 +128,7 @@ def main() -> None:
         raise SystemExit(1) from error
 
     if args.prelobby:
-        if __package__ in {None, ""}:
-            from prelobby_pygame import run_prelobby_to_lobby  # type: ignore
-        else:
-            from client.prelobby_pygame import run_prelobby_to_lobby
+        from client.prelobby_pygame import run_prelobby_to_lobby
 
         # // Feature: Client Launcher
         # // Purpose: Implements the 'validate for prelobby' step of the client launcher system.
@@ -161,10 +156,7 @@ def main() -> None:
         )
         return
 
-    if __package__ in {None, ""}:
-        from game_window import main as pygame_main  # type: ignore
-    else:
-        from client.game_window import main as pygame_main
+    from client.game_window import main as pygame_main
 
     pygame_username = args.username or DEFAULT_USERNAME
     is_valid, result_message = validate_username(pygame_username)

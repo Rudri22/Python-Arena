@@ -44,6 +44,8 @@ BACKEND_FEATURES: dict[str, str] = {
 # // Purpose: Return True when an endpoint host is loopback/localhost and unsuitable for remote peers.
 # // Trigger: Called by the server message routing flow when this helper is needed.
 def _is_loopback_host(host: str) -> bool:
+    """Return True for localhost-style addresses that should not be advertised to peers."""
+
     text = str(host or "").strip().lower()
     return text == "localhost" or text.startswith("127.")
 
@@ -650,6 +652,8 @@ def _handle_emote_message(
     server_state: ServerState,
     sender_client_id: str,
 ) -> None:
+    """Validate and route one spectator/player emote to the active match session."""
+
     sender_username = server_state.get_client_username(sender_client_id)
     if sender_username is None:
         return
