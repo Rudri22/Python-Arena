@@ -266,6 +266,9 @@ class ServerState:
     def set_client_chat_endpoint(self, client_id: str, host: str | None, port: int | None) -> None:
         """Store a peer-chat endpoint advertised by one connected client."""
 
+        # We do not open or proxy this socket from the server. We only remember
+        # where the client says its P2P chat listener is, then publish that to
+        # other clients in ONLINE_USERS.
         if host is None or port is None:
             return
         host_text = str(host).strip()
@@ -408,6 +411,8 @@ class ServerState:
                 if endpoint is None:
                     continue
                 host, port = endpoint
+                # Shape kept JSON-friendly because this rides inside the normal
+                # ONLINE_USERS protocol message.
                 peers[username] = {"host": host, "port": int(port)}
             return peers
 

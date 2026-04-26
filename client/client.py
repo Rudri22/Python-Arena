@@ -17,38 +17,36 @@ from shared.protocol import MessageType, make_username_message
 DEFAULT_SERVER_IP = "127.0.0.1"
 DEFAULT_SERVER_PORT = 5000
 DEFAULT_USERNAME = "Player"
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 16
 
 
-# // Feature: Client Launcher
-# // Purpose: Implements the 'show system' step of the client launcher system.
-# // Trigger: Called by the client launcher flow when this helper is needed.
 def show_system(message: str) -> None:
+    """Print a launcher status message for the user."""
+
     print(f"[SYSTEM] {message}")
 
 
-# // Feature: Client Launcher
-# // Purpose: Implements the 'show username validation result' step of the client launcher system.
-# // Trigger: Called by the client launcher flow when this helper is needed.
 def show_username_validation_result(is_valid: bool, message: str) -> None:
+    """Print whether the chosen username passed local validation."""
+
     prefix = "[USERNAME][OK]" if is_valid else "[USERNAME][INVALID]"
     print(f"{prefix} {message}")
 
 
-# // Feature: Client Launcher
-# // Purpose: Implements the 'validate username' step of the client launcher system.
-# // Trigger: Called before state changes to enforce game and input rules.
 def validate_username(username: str) -> tuple[bool, str]:
-    if not (2 <= len(username) <= 16):
-        return False, "Username must be between 2 and 16 characters."
+    """Validate the username before it is sent over the socket."""
+
+    if not (USERNAME_MIN_LENGTH <= len(username) <= USERNAME_MAX_LENGTH):
+        return False, "Username must be between 3 and 16 characters."
     if not all(ch.isalnum() or ch in {"_", "-"} for ch in username):
         return False, "Username can only contain letters, numbers, '_' or '-'."
     return True, f"Username '{username}' is valid."
 
 
-# // Feature: Client Launcher
-# // Purpose: Implements the 'parse args' step of the client launcher system.
-# // Trigger: Called at application startup from the CLI entry flow.
 def parse_args() -> argparse.Namespace:
+    """Read command-line options for the client launcher."""
+
     parser = argparse.ArgumentParser(description="Python-Arena client")
     parser.add_argument(
         "--server-ip",
@@ -72,19 +70,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# // Feature: Client Launcher
-# // Purpose: Implements the 'validate server address' step of the client launcher system.
-# // Trigger: Called before state changes to enforce game and input rules.
 def validate_server_address(server_ip: str, server_port: int) -> None:
+    """Fail fast when the server IP or TCP port is invalid."""
+
     ipaddress.ip_address(server_ip)
     if not 1 <= server_port <= 65535:
         raise ValueError("Server port must be between 1 and 65535.")
 
 
-# // Feature: Client Launcher
-# // Purpose: Implements the 'check username available' step of the client launcher system.
-# // Trigger: Called by the client launcher flow when this helper is needed.
 def check_username_available(server_ip: str, server_port: int, username: str) -> tuple[bool, str]:
+    """Ask the server whether this username is currently available."""
+
     connection = ClientConnection(server_ip=server_ip, server_port=server_port)
     try:
         connection.receive_message()  # connect ack
@@ -104,10 +100,9 @@ def check_username_available(server_ip: str, server_port: int, username: str) ->
         connection.close()
 
 
-# // Feature: Client Launcher
-# // Purpose: Coordinates the top-level execution flow for this part of the game.
-# // Trigger: Called at application startup from the CLI entry flow.
 def main() -> None:
+    """Launch the pre-lobby, gameplay window, or spectator mode."""
+
     args = parse_args()
 
     if args.spectator and args.prelobby:
@@ -130,10 +125,9 @@ def main() -> None:
     if args.prelobby:
         from client.prelobby_pygame import run_prelobby_to_lobby
 
-        # // Feature: Client Launcher
-        # // Purpose: Implements the 'validate for prelobby' step of the client launcher system.
-        # // Trigger: Called by the client launcher flow when this helper is needed.
         def _validate_for_prelobby(candidate: str) -> tuple[bool, str]:
+            """Run local username checks, then confirm availability with the server."""
+
             is_valid, result_message = validate_username(candidate)
             if not is_valid:
                 return False, result_message

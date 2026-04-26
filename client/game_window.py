@@ -2228,6 +2228,8 @@ class PygameArenaWindow:
         self.last_server_message = f"Connected to {self.server_ip}:{self.server_port}"
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
+        # Game windows reconnect as fresh TCP clients, then reclaim the same
+        # username/session so the server can attach them to the active match.
         self.connection.send_message(
             make_username_message(
                 self.username,
@@ -2252,6 +2254,8 @@ class PygameArenaWindow:
     # // Purpose: Implements the 'receiver loop' step of the gameplay networking system.
     # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _receiver_loop(self) -> None:
+        # Keep network I/O in a background thread. The render loop reads decoded
+        # messages from a queue, so socket waits do not hitch gameplay.
         while self.running and self.connection is not None:
             try:
                 msg = self.connection.receive_message()
@@ -2379,6 +2383,8 @@ class PygameArenaWindow:
             return
 
         if msg_type == MessageType.GAME_STATE.value:
+            # The server owns the match state. The client only renders and
+            # interpolates this authoritative snapshot.
             self.active_game_id = payload.get("game_id", self.active_game_id)
             state = payload.get("state", {})
             self._sync_from_game_state(state)
@@ -2389,6 +2395,8 @@ class PygameArenaWindow:
             return
 
         if msg_type == MessageType.CHAT.value:
+            # Match cheer messages are routed by the server because they belong
+            # to everyone watching the current game session.
             sender = str(payload.get("sender", "SERVER"))
             text   = str(payload.get("message", ""))
             if str(payload.get("scope", "")).lower() == "lobby":
@@ -2520,6 +2528,8 @@ class PygameArenaWindow:
         # Immediate local feedback so key presses feel responsive even before echo.
         self._show_emote_locally(sender=self.username, emote=emote_name)
         try:
+            # Emotes go to the server, which rebroadcasts them to the two
+            # players plus all spectators in the same match.
             self.connection.send_message(
                 make_emote_message(sender=self.username, emote=emote_name, game_id=self.active_game_id)
             )
@@ -2925,6 +2935,8 @@ class PygameArenaWindow:
         if self.connection is None or not self.username_confirmed or self.active_game_id is None:
             return
         try:
+            # Movement is just an input command. The server validates it and
+            # sends back GAME_STATE; the client does not decide collisions.
             self.connection.send_message(make_movement_message(player=self.username, direction=direction))
         except OSError as err:
             self._mark_connection_issue(f"Move send failed: {err}")

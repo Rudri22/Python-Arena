@@ -22,6 +22,9 @@ from shared.utils import encode_message_for_socket, split_socket_buffer
 def _detect_local_ip(server_ip: str) -> str:
     """Best-effort local IP detection used for P2P endpoint advertisement."""
 
+    # The server only coordinates the chat directory; private chat itself is
+    # direct client-to-client TCP. This probes the network stack for the LAN IP
+    # other clients can actually dial instead of blindly advertising localhost.
     loopback_ip = ""
     probe_targets: list[tuple[str, int]] = [
         (str(server_ip).strip(), 9),
@@ -53,7 +56,12 @@ def _detect_local_ip(server_ip: str) -> str:
 
 
 class _P2PChatNode:
-    """Lightweight peer-chat transport over direct TCP connections."""
+    """Lightweight peer-chat transport over direct TCP connections.
+
+    Each client opens a tiny listener socket on a random free port. The server
+    shares those endpoints in ONLINE_USERS, then chat messages are sent straight
+    from one client socket to the other without server relaying.
+    """
 
     # // Feature: Networking / P2P Chat
     # // Purpose: Implements the 'init' step of the networking / p2p chat system.
@@ -66,6 +74,8 @@ class _P2PChatNode:
         self._inbox: queue.Queue[dict[str, Any]] = queue.Queue()
         self._running = True
 
+        # Bind to every local interface and let the OS pick an unused port.
+        # The chosen port is advertised during USERNAME_SUBMISSION.
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.bind(("0.0.0.0", 0))
@@ -87,6 +97,8 @@ class _P2PChatNode:
     # // Purpose: Implements the 'set peer directory' step of the networking / p2p chat system.
     # // Trigger: Called by the networking / p2p chat flow when this helper is needed.
     def set_peer_directory(self, peers: dict[str, Any]) -> None:
+        # ONLINE_USERS may contain every connected player, including ourselves.
+        # Keep only reachable peer endpoints so send_chat can be a simple lookup.
         parsed: dict[str, tuple[str, int]] = {}
         with self._lock:
             me_cf = self.username.casefold()
@@ -144,11 +156,15 @@ class _P2PChatNode:
 
         targets: list[tuple[str, tuple[str, int]]] = []
         if recipient_text:
+            # Private tab: dial exactly one peer using the endpoint advertised
+            # through the server's online-user snapshot.
             target = next((n for n in peers if n.casefold() == recipient_text.casefold()), None)
             if target is None:
                 return False, f"User '{recipient_text}' is not available for P2P chat."
             targets = [(target, peers[target])]
         else:
+            # Lobby text is still P2P: the sender opens one short TCP connection
+            # to each online peer instead of asking the server to broadcast it.
             targets = [
                 (name, endpoint)
                 for name, endpoint in peers.items()
@@ -161,7 +177,8 @@ class _P2PChatNode:
         failures: list[str] = []
         for target_name, (host, port) in targets:
             try:
-                # Keep P2P chat responsive: fail fast on unreachable peers.
+                # Keep P2P chat responsive: fail fast on unreachable peers so a
+                # dead client does not freeze the lobby UI.
                 peer_sock = socket.create_connection((host, port), timeout=0.35)
                 try:
                     peer_sock.settimeout(0.35)
@@ -194,6 +211,9 @@ class _P2PChatNode:
     # // Purpose: Implements the 'accept loop' step of the networking / p2p chat system.
     # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _accept_loop(self) -> None:
+        # This listener runs beside the normal server connection. Incoming peer
+        # chats are short-lived connections, so each one can be decoded and
+        # closed without affecting the main game socket.
         while self._running:
             try:
                 conn, _addr = self._listener.accept()
@@ -220,6 +240,8 @@ class _P2PChatNode:
                 if not data:
                     return
                 buffer += data.decode("utf-8", errors="replace")
+                # Peer chat uses the same newline-framed JSON format as the
+                # client/server protocol, which keeps parsing consistent.
                 messages, buffer = split_socket_buffer(buffer)
                 for msg in messages:
                     if not isinstance(msg, dict):
@@ -252,7 +274,9 @@ class ClientConnection:
         self.server_ip = server_ip
         self.server_port = server_port
 
-        # PBI 1.8: connection is established from explicit IP + port.
+        # Main client/server channel: one long-lived TCP connection carries
+        # username, lobby, invitation, movement, game-state, cheer, and emote
+        # messages. The P2P chat listener below is separate.
         self.socket = socket.create_connection(
             (server_ip, server_port),
             timeout=connect_timeout_seconds,
@@ -266,7 +290,8 @@ class ClientConnection:
         self.chat_host = self._p2p_chat.advertise_host
         self.chat_port = self._p2p_chat.port
 
-        # Short read timeout lets us interleave peer-message polling.
+        # Short read timeout lets us interleave server reads with peer-message
+        # polling; otherwise private chat could wait behind a quiet game socket.
         self.socket.settimeout(0.2)
         self._buffer = ""
         # Keep extra decoded messages if one recv contains multiple lines.
@@ -282,6 +307,8 @@ class ClientConnection:
         if message.get("type") == MessageType.USERNAME.value:
             payload = message.get("payload")
             if isinstance(payload, dict):
+                # Username registration doubles as P2P chat registration. The
+                # server stores this endpoint and republishes it to other clients.
                 if "chat_host" not in payload:
                     payload["chat_host"] = self.chat_host
                 if "chat_port" not in payload:
@@ -332,6 +359,8 @@ class ClientConnection:
 
             p2p_message = self._p2p_chat.pop_message()
             if p2p_message is not None:
+                # From the UI's point of view, direct peer messages look just
+                # like server messages, so lobby/game screens can handle one queue.
                 return p2p_message
 
             messages, remainder = split_socket_buffer(self._buffer)
@@ -377,4 +406,6 @@ class ClientConnection:
             return
         peers = payload.get("chat_peers")
         if isinstance(peers, dict):
+            # The server is acting as a directory only. After this update, actual
+            # chat delivery is direct TCP between clients.
             self._p2p_chat.set_peer_directory(peers)

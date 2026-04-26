@@ -20,7 +20,8 @@ def encode_message_for_socket(message: dict[str, Any]) -> bytes:
     Encode one protocol message as newline-delimited JSON bytes.
 
     Using a newline as the message separator keeps socket handling simple:
-    every complete line is one complete protocol message.
+    every complete line is one complete protocol message. TCP is a stream,
+    not a message queue, so we add this small delimiter ourselves.
     """
 
     return f"{serialize_message(message)}\n".encode("utf-8")
@@ -34,15 +35,15 @@ def split_socket_buffer(buffer: str) -> tuple[list[dict[str, Any]], str]:
     Extract all complete messages from a text buffer.
 
     Socket reads do not always align perfectly with message boundaries.
-    Because of that, we keep any incomplete trailing text in `remainder`
-    and wait for the next socket read to finish the message.
+    One `recv` can contain half a JSON message or several JSON messages at
+    once, so we keep the unfinished tail and parse only complete lines.
     """
 
     complete_messages: list[dict[str, Any]] = []
     lines = buffer.split("\n")
 
-    # Everything except the last chunk is a complete line/message.
-    # The final chunk might be incomplete, so we keep it for later.
+    # Everything except the last chunk ended with "\n", so it is safe to
+    # parse. The final chunk stays in the buffer until more bytes arrive.
     for line in lines[:-1]:
         line = line.strip()
         if line:

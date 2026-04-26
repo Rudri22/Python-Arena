@@ -26,6 +26,9 @@ from shared.protocol import (
 )
 from shared.utils import encode_message_for_socket, split_socket_buffer
 
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 16
+
 # Backend feature map for prelobby/lobby ownership.
 # These IDs mirror the frontend list in `client/prelobby_pygame.py`.
 BACKEND_FEATURES: dict[str, str] = {
@@ -46,6 +49,8 @@ BACKEND_FEATURES: dict[str, str] = {
 def _is_loopback_host(host: str) -> bool:
     """Return True for localhost-style addresses that should not be advertised to peers."""
 
+    # A peer cannot usually connect to another machine's "localhost". If a client
+    # advertises 127.x, we prefer the host observed from the server-side socket.
     text = str(host or "").strip().lower()
     return text == "localhost" or text.startswith("127.")
 
@@ -56,6 +61,8 @@ def _is_loopback_host(host: str) -> bool:
 def send_message(client_socket: socket.socket, message: dict) -> None:
     """Send one protocol message as newline-delimited JSON bytes."""
 
+    # All server replies go through the same JSON + newline framing, so the
+    # client can decode CONNECT, ONLINE_USERS, GAME_STATE, CHAT, and ERROR alike.
     client_socket.sendall(encode_message_for_socket(message))
 
 
@@ -82,6 +89,8 @@ def broadcast_online_users(server_state: ServerState) -> None:
     message["payload"]["active_matches"] = server_state.get_active_matches_snapshot()
     message["payload"]["chat_peers"] = server_state.get_chat_peers_snapshot()
 
+    # This broadcast is also the P2P chat directory update. The server tells
+    # clients where peers are listening, but it does not carry private messages.
     for sock in server_state.get_client_sockets():
         try:
             send_message(sock, message)
@@ -585,6 +594,9 @@ def _handle_chat_message(
     is_cheer = message_kind == "cheer" or text.lower().startswith("/cheer")
 
     if is_cheer:
+        # Cheering is intentionally server-routed because it belongs to a live
+        # match session: both players and any spectators should see the same
+        # crowd message at the same time. Private/lobby chat stays P2P.
         cheer_text = text
         if cheer_text.lower().startswith("/cheer"):
             cheer_text = cheer_text[6:].strip(" :-")
@@ -626,6 +638,8 @@ def _handle_chat_message(
             send_message(client_socket, make_error_message("Cheer failed: match recipients unavailable."))
             return
 
+        # Match-session sockets include active players plus spectators, so a
+        # cheer behaves like a public arena shout instead of a private DM.
         for sock in sockets:
             try:
                 send_message(sock, cheer_message)
@@ -677,6 +691,8 @@ def _handle_emote_message(
     msg = make_emote_message(sender=sender_username, emote=emote, game_id=resolved_game_id)
     sender_socket = server_state.get_socket_for_username(sender_username)
     delivered_to_sender = False
+    # Emotes are small match events. The server resolves the active game once,
+    # then fans the event out to everyone watching that same session.
     for sock in server_state.get_match_session_sockets(resolved_game_id):
         if sender_socket is not None and sock is sender_socket:
             delivered_to_sender = True
@@ -723,6 +739,12 @@ def handle_incoming_message(
         if not username:
             send_message(client_socket, make_error_message("Username cannot be empty."))
             return
+        if not (USERNAME_MIN_LENGTH <= len(username) <= USERNAME_MAX_LENGTH):
+            send_message(client_socket, make_error_message("Username must be between 3 and 16 characters."))
+            return
+        if not all(ch.isalnum() or ch in {"_", "-"} for ch in username):
+            send_message(client_socket, make_error_message("Username can only contain letters, numbers, '_' or '-'."))
+            return
 
         accepted, reason = server_state.set_client_username(client_id, username)
         if not accepted:
@@ -739,8 +761,10 @@ def handle_incoming_message(
             chat_port = int(payload.get("chat_port", 0))
         except (TypeError, ValueError):
             chat_port = 0
-        # Keep chat strictly P2P and avoid advertising loopback endpoints to
-        # remote peers (common when host runs client+server on one machine).
+        # Register this client's P2P chat listener. If the client gave us a LAN
+        # address, use it; otherwise fall back to the IP we see on this socket.
+        # This keeps private chat direct while still letting the server be the
+        # trusted directory for who is online.
         try:
             observed_chat_host = str(client_socket.getpeername()[0]).strip()
         except OSError:
@@ -845,6 +869,9 @@ def handle_client_connection(
             text_buffer += data.decode("utf-8", errors="replace")
 
             try:
+                # TCP can split or combine app messages. The buffer helper gives
+                # us every full JSON line and keeps the unfinished tail for the
+                # next recv.
                 messages, text_buffer = split_socket_buffer(text_buffer)
             except ProtocolError as error:
                 send_message(client_socket, make_error_message("Malformed message.", str(error)))

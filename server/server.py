@@ -74,6 +74,8 @@ def validate_port(port: int) -> None:
 def create_server_socket(host: str, port: int) -> socket.socket:
     """Create, bind, and listen on the server socket."""
 
+    # This is the server's public TCP door. Clients connect here first, then
+    # each accepted socket is handed to a handler thread.
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     # Allows quick restart of the server without waiting for TIME_WAIT cleanup.
@@ -108,15 +110,19 @@ def run_server(host: str, port: int) -> None:
 
         try:
             while True:
+                # accept() blocks until a new client completes the TCP handshake.
+                # The returned socket is dedicated to that one client session.
                 client_socket, client_address = server_socket.accept()
                 try:
+                    # Game movement feels better when tiny protocol messages are
+                    # sent immediately instead of being batched by Nagle's algorithm.
                     client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 except OSError:
                     pass
                 print(f"[SERVER] Connection accepted from {client_address}")
 
-                # PBI 1.5 + PBI 1.6: each client runs in its own handler thread
-                # so communication can happen concurrently.
+                # One handler thread per client keeps slow or idle sockets from
+                # blocking everyone else in the lobby.
                 client_thread = threading.Thread(
                     target=handle_client_connection,
                     args=(client_socket, client_address, server_state),
@@ -162,8 +168,8 @@ def _run_game_loop(server_state: ServerState) -> None:
         max_workers=24,
         thread_name_prefix="arena-send",
     )
-    # One in-flight GAME_STATE send per socket. If a client is slow, we drop
-    # intermediate snapshots for that client instead of stalling the loop.
+    # One in-flight GAME_STATE send per socket. If a client is slow, we skip
+    # intermediate snapshots for that client instead of stalling the whole arena.
     state_send_futures_by_fileno: dict[int, concurrent.futures.Future[None]] = {}
     try:
         while True:

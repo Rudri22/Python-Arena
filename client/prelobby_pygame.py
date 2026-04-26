@@ -1087,13 +1087,13 @@ class PreLobby:
         return pygame.Rect(card.centerx - 130, card.y + 360, 260, 50)
 
     # // Feature: Pre-Lobby UI
-    # // Purpose: Implements the 'name is valid' step of the pre-lobby ui system.
-    # // Trigger: Called by the pre-lobby ui flow when this helper is needed.
+    # The pre-lobby gives instant feedback before the server does the final
+    # availability check.
     def _name_is_valid(self) -> bool:
         text = self.name_text.strip()
-        if len(text) < 3:
+        if not (3 <= len(text) <= 16):
             return False
-        return all(ch.isalnum() or ch in ("_", "-", " ") for ch in text)
+        return all(ch.isalnum() or ch in ("_", "-") for ch in text)
 
     # // Feature: Pre-Lobby UI
     # // Purpose: Centered bounded layout, supports 4+2 style row wrapping.
@@ -2013,6 +2013,8 @@ class PygameLobbyScene:
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
         try:
+            # The username packet also advertises this client's P2P chat
+            # listener. The server stores it and shares it in ONLINE_USERS.
             self.connection.send_message(
                 make_username_message(
                     self.username,
@@ -2109,6 +2111,8 @@ class PygameLobbyScene:
     # // Purpose: Implements the 'receiver loop' step of the lobby ui / matchmaking system.
     # // Trigger: Called continuously by the main loop/thread while the app is running.
     def _receiver_loop(self) -> None:
+        # Socket reads stay off the Pygame thread. That way a quiet server or a
+        # slow peer chat packet cannot freeze rendering/click handling.
         while self.running and self.connection is not None:
             try:
                 msg = self.connection.receive_message()
@@ -2148,6 +2152,8 @@ class PygameLobbyScene:
             self._append_log(f"[CONNECT] {payload}")
             return
         if msg_type == MessageType.ONLINE_USERS.value:
+            # This packet is our lobby heartbeat: names, wins, active matches,
+            # and P2P chat endpoints all arrive through this one server message.
             new_online_users = list(payload.get("users", []))
             idle_payload = payload.get("idle_users", [])
             new_idle_users = {str(u) for u in idle_payload if isinstance(u, str)}
@@ -2537,6 +2543,8 @@ class PygameLobbyScene:
             return
         try:
             if self.chat_mode == "private" and self.active_private_target is not None:
+                # Private tabs use direct peer-to-peer TCP. The server only gave
+                # us the peer address earlier through ONLINE_USERS.
                 ok, error_text = self.connection.send_chat_message(
                     sender=self.username,
                     message=text,
@@ -2548,6 +2556,8 @@ class PygameLobbyScene:
                 elif error_text:
                     self._append_log(f"[ERROR] {error_text}")
             else:
+                # Lobby chat is also P2P: send the same message to every known
+                # peer so the server is not a chat relay.
                 ok, error_text = self.connection.send_chat_message(
                     sender=self.username,
                     message=text,
